@@ -1,0 +1,16 @@
+{
+  "slug": "psn-gift-card-hk",
+  "title": "香港 PSN 禮物卡：購買及兌換指南",
+  "description": "如何在 3388.HK 購買香港 PlayStation Store 禮物卡，以及在 PS5／PS4 兌換的一般步驟。",
+  "date": "2026-10-12",
+  "product": "psn-hk",
+  "productName": "香港 PSN 禮物卡",
+  "body": [
+    ["p", "香港 PSN 禮物卡可為香港區 PlayStation 帳戶增值錢包餘額，用於購買遊戲、追加內容或訂閱服務。"],
+    ["h2", "購買前請確認"],
+    ["ul", ["你的 PlayStation 帳戶地區為香港，不同地區的禮物卡一般不能互通。", "選擇合適面額，可用數量選擇器一次購買多張。"]],
+    ["h2", "兌換方法（一般流程）"],
+    ["ol", ["在 3388.HK 完成付款後，於會員中心取得兌換碼。", "在主機或 PlayStation 官方網站登入帳戶。", "前往 PlayStation Store 的「兌換代碼」功能，輸入兌換碼。"]],
+    ["p", "實際介面可能隨系統更新而改變，請以 PlayStation 官方說明為準。"]
+  ]
+}

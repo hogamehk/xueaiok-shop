@@ -1,0 +1,2001 @@
+/* 3388 Shop — SPA router, cart, checkout */
+(function () {
+  "use strict";
+
+  const DATA = window.XUEAIOK_DATA;
+  const CART_KEY = "xueaiok_cart_v1";
+  const ORDER_KEY = "xueaiok_last_order_v1";
+  const HIDDEN_ORDERS_KEY = "xueaiok_hidden_orders_v1";
+  const API = "/api";
+
+  let currentUser = null; // { username } | null
+  let authReady = false;
+  let lastOrdersCache = [];
+
+  async function api(path, opts = {}) {
+    const res = await fetch(API + path, {
+      credentials: "same-origin",
+      headers: { "Content-Type": "application/json", ...(opts.headers || {}) },
+      ...opts,
+    });
+    let body = null;
+    try {
+      body = await res.json();
+    } catch {
+      body = null;
+    }
+    return { ok: res.ok, status: res.status, body };
+  }
+
+  async function refreshAuth() {
+    try {
+      const { ok, body } = await api("/me");
+      currentUser = ok && body?.username ? { username: body.username, order_count: body.order_count || 0 } : null;
+    } catch {
+      currentUser = null;
+    }
+    authReady = true;
+    updateAuthUI();
+  }
+
+  function updateAuthUI() {
+    const slot = $("#auth-slot");
+    if (slot) {
+      if (currentUser) {
+        slot.innerHTML = `
+          <a class="auth-user" href="#/account" title="${escapeHtml(currentUser.username)}">${escapeHtml(currentUser.username)}</a>
+          <button type="button" class="auth-link auth-logout" id="logout-btn">登出</button>`;
+        $("#logout-btn")?.addEventListener("click", async () => {
+          await api("/logout", { method: "POST", body: "{}" });
+          currentUser = null;
+          updateAuthUI();
+          toast("已登出");
+          const route = parseHash();
+          if (["login", "register", "account", "orders", "order-detail"].includes(route.page)) navigate("/");
+          else render();
+        });
+      } else {
+        slot.innerHTML = `
+          <a class="auth-link" href="#/login">登入</a>
+          <a class="btn btn-accent btn-sm auth-register" href="#/register">註冊</a>`;
+      }
+    }
+    $$("[data-auth]").forEach((el) => {
+      const mode = el.dataset.auth;
+      if (mode === "guest") el.hidden = !!currentUser;
+      if (mode === "user") {
+        el.hidden = !currentUser;
+        if (currentUser && el.id === "mobile-user") {
+          el.textContent = "會員中心 · " + currentUser.username;
+          el.href = "#/account";
+        }
+      }
+    });
+  }
+
+
+  const $ = (sel, el = document) => el.querySelector(sel);
+  const $$ = (sel, el = document) => [...el.querySelectorAll(sel)];
+
+  function money(n) {
+    return "HK$" + Number(n).toLocaleString("en-HK", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  }
+
+  function getProduct(id) {
+    return DATA.products.find((p) => p.id === id);
+  }
+
+  function getCategory(id) {
+    return DATA.categories.find((c) => c.id === id);
+  }
+
+  function productInitials(name) {
+    const parts = name.replace(/[：:]/g, " ").split(/\s+/).filter(Boolean);
+    if (parts.length === 1) return parts[0].slice(0, 2);
+    return (parts[0][0] + (parts[1]?.[0] || "")).toUpperCase();
+  }
+
+  function thumbStyle(product) {
+    return `background: linear-gradient(145deg, ${product.color}ee, ${product.color}88);`;
+  }
+
+  function loadCart() {
+    try {
+      return JSON.parse(localStorage.getItem(CART_KEY)) || [];
+    } catch {
+      return [];
+    }
+  }
+
+  function saveCart(cart) {
+    localStorage.setItem(CART_KEY, JSON.stringify(cart));
+    updateCartBadge();
+  }
+
+  function cartCount() {
+    return loadCart().reduce((s, i) => s + i.qty, 0);
+  }
+
+  function cartSubtotal() {
+    return loadCart().reduce((s, i) => s + i.sale * i.qty, 0);
+  }
+
+  const QFPAY_FEE_RATE = 0.012;
+  const QFPAY_MAX_HKD = 2000;
+  const QFPAY_METHODS = new Set(["qfpay_fps", "qfpay_payme", "qfpay_wechat"]);
+  const ANTOM_FEE_RATES = { alipay_hk: 0.022, boost: 0.025, tng: 0.025 };
+  const ANTOM_METHODS = new Set(["alipay_hk", "boost", "tng"]);
+
+  function feeRateLabel(rate) {
+    const pct = Math.round(Number(rate) * 1000) / 10;
+    return Number.isInteger(pct) ? pct + "%" : String(pct) + "%";
+  }
+
+  function feeAmounts(subtotal, rate) {
+    const sub = Number(subtotal) || 0;
+    const chargeCents = Math.round(sub * (1 + Number(rate)) * 100);
+    const charge = chargeCents / 100;
+    const fee = Math.round((charge - sub) * 100) / 100;
+    return { subtotal: sub, adminFee: fee, charge, feeRate: Number(rate) };
+  }
+
+  function qfpayAmounts(subtotal) {
+    const amt = feeAmounts(subtotal, QFPAY_FEE_RATE);
+    const over = amt.subtotal > QFPAY_MAX_HKD || amt.charge > QFPAY_MAX_HKD;
+    return { ...amt, overLimit: over };
+  }
+
+  function checkoutFeeForMethod(method, subtotal) {
+    if (QFPAY_METHODS.has(method)) {
+      const a = qfpayAmounts(subtotal);
+      return { ...a, feeLabel: "行政費 " + feeRateLabel(QFPAY_FEE_RATE), applies: true };
+    }
+    if (ANTOM_METHODS.has(method)) {
+      const rate = ANTOM_FEE_RATES[method];
+      const a = feeAmounts(subtotal, rate);
+      return { ...a, feeLabel: "行政費 " + feeRateLabel(rate), applies: true, overLimit: false };
+    }
+    return { subtotal, adminFee: 0, charge: subtotal, feeLabel: "行政費", applies: false, overLimit: false };
+  }
+
+  function orderFeeLabel(order) {
+    if (order && order.fee_label) return order.fee_label;
+    const m = (order && order.payment_method) || "";
+    if (ANTOM_FEE_RATES[m] != null) return "行政費 " + feeRateLabel(ANTOM_FEE_RATES[m]);
+    if (QFPAY_METHODS.has(m)) return "行政費 " + feeRateLabel(QFPAY_FEE_RATE);
+    return "行政費";
+  }
+
+  function addToCart(productId, optionId, qty) {
+    const product = getProduct(productId);
+    const option = product?.options.find((o) => o.id === optionId);
+    if (!product || !option) return;
+
+    const cart = loadCart();
+    const key = productId + "::" + optionId;
+    const existing = cart.find((i) => i.key === key);
+    if (existing) {
+      existing.qty += qty;
+    } else {
+      cart.push({
+        key,
+        productId,
+        optionId,
+        name: product.name,
+        optionLabel: option.label,
+        sale: option.sale,
+        list: option.list,
+        color: product.color,
+        needsUid: !!product.needsUid,
+        qty,
+      });
+    }
+    saveCart(cart);
+    toast(`已加入購物車：${product.name}（${option.label}）`);
+  }
+
+  function updateQty(key, qty) {
+    const cart = loadCart();
+    const item = cart.find((i) => i.key === key);
+    if (!item) return;
+    item.qty = Math.max(1, Math.min(99, qty));
+    saveCart(cart);
+  }
+
+  function removeItem(key) {
+    saveCart(loadCart().filter((i) => i.key !== key));
+  }
+
+  function clearCart() {
+    saveCart([]);
+  }
+
+  function updateCartBadge() {
+    const n = cartCount();
+    $$(".cart-count").forEach((el) => {
+      el.textContent = n > 0 ? String(n) : "";
+      el.dataset.count = String(n);
+    });
+  }
+
+  function toast(msg) {
+    let wrap = $(".toast-wrap");
+    if (!wrap) {
+      wrap = document.createElement("div");
+      wrap.className = "toast-wrap";
+      document.body.appendChild(wrap);
+    }
+    const el = document.createElement("div");
+    el.className = "toast";
+    el.textContent = msg;
+    wrap.appendChild(el);
+    setTimeout(() => {
+      el.style.opacity = "0";
+      el.style.transition = "opacity 0.3s";
+      setTimeout(() => el.remove(), 300);
+    }, 2400);
+  }
+
+  function parseHash() {
+    let raw = (location.hash || "#/").replace(/^#/, "") || "/";
+    const qIdx = raw.indexOf("?");
+    let query = {};
+    if (qIdx >= 0) {
+      const qs = raw.slice(qIdx + 1);
+      raw = raw.slice(0, qIdx);
+      qs.split("&").forEach((pair) => {
+        const [k, v] = pair.split("=");
+        if (k) query[decodeURIComponent(k)] = decodeURIComponent(v || "");
+      });
+    }
+    const parts = raw.split("/").filter(Boolean).map((p) => p.split("?")[0]);
+    if (parts.length === 0) return { page: "home", query };
+    if (parts[0] === "catalog") return { page: "catalog", category: parts[1] || null, query };
+    if (parts[0] === "product" && parts[1]) return { page: "product", id: parts[1], query };
+    if (parts[0] === "cart") return { page: "cart", query };
+    if (parts[0] === "checkout") return { page: "checkout", query };
+    if (parts[0] === "order") return { page: "order", query };
+    if (parts[0] === "pay-result" && parts[1]) return { page: "pay-result", id: parts[1], query };
+    if (parts[0] === "login") return { page: "login", query };
+    if (parts[0] === "register") return { page: "register", query };
+    if (parts[0] === "account") {
+      if (parts[1] === "password") return { page: "account", section: "password", query };
+      return { page: "account", query };
+    }
+    if (parts[0] === "member") return { page: "account", query };
+    if (parts[0] === "orders") {
+      if (parts[1]) return { page: "order-detail", id: parts[1], query };
+      return { page: "orders", query };
+    }
+    return { page: "home", query };
+  }
+
+  function navigate(path) {
+    location.hash = path.startsWith("#") ? path : "#" + path;
+  }
+
+  function setActiveNav(page, category) {
+    $$(".nav-links a, .mobile-nav a").forEach((a) => {
+      const href = a.getAttribute("href") || "";
+      let active = false;
+      if (page === "home" && (href === "#/" || href === "#")) active = true;
+      if (page === "catalog" && href === "#/catalog" && !category) active = true;
+      if (page === "catalog" && category && href === "#/catalog/" + category) active = true;
+      if (page === "catalog" && !category && href.includes("catalog") && href !== "#/catalog") active = false;
+      if ((page === "cart" || page === "checkout") && href.includes("cart")) active = true;
+      a.classList.toggle("active", active);
+    });
+
+    $$(".bottom-nav a").forEach((a) => {
+      const nav = a.dataset.nav;
+      let active = false;
+      if (nav === "home" && page === "home") active = true;
+      if (nav === "catalog" && page === "catalog" && category !== "giftcard") active = true;
+      if (nav === "giftcard" && page === "catalog" && category === "giftcard") active = true;
+      if (nav === "cart" && (page === "cart" || page === "checkout" || page === "order")) active = true;
+      if (nav === "account" && (page === "account" || page === "orders" || page === "order-detail")) active = true;
+      a.classList.toggle("active", active);
+    });
+  }
+
+  function productCardHTML(p, extraClass) {
+    const cheapest = Math.min(...p.options.map((o) => o.sale));
+    const cheapestList = p.options.find((o) => o.sale === cheapest)?.list;
+    const cat = getCategory(p.category);
+    const cls = extraClass ? `product-card ${extraClass}` : "product-card";
+    return `
+      <article class="${cls}">
+        <a href="#/product/${p.id}">
+          <div class="product-thumb" style="${thumbStyle(p)}">
+            ${p.badge ? `<span class="product-badge">${p.badge}</span>` : ""}
+            <span>${productInitials(p.name)}</span>
+          </div>
+        </a>
+        <div class="product-body">
+          <div class="product-cat">${cat ? cat.name : ""}</div>
+          <h3><a href="#/product/${p.id}">${p.name}</a></h3>
+          <div class="product-price">
+            <span class="price-sale">起 ${money(cheapest)}</span>
+            ${cheapestList > cheapest ? `<span class="price-list">${money(cheapestList)}</span>` : ""}
+          </div>
+          <a class="product-cta" href="#/product/${p.id}">選面額</a>
+        </div>
+      </article>`;
+  }
+
+  function shelfHTML(title, link, products) {
+    if (!products.length) return "";
+    return `
+      <section class="shelf">
+        <div class="section-head">
+          <h2>${title}</h2>
+          <a href="${link}">查看全部</a>
+        </div>
+        <div class="shelf-track">
+          ${products.map((p) => productCardHTML(p, "shelf-card")).join("")}
+        </div>
+      </section>`;
+  }
+
+  function renderHome() {
+    const giftcards = DATA.products.filter((p) => p.category === "giftcard");
+    const mobile = DATA.products.filter((p) => p.category === "mobile");
+    const hot = DATA.products.filter((p) => p.hot);
+    const featured = (hot.length ? hot : DATA.products).slice(0, 8);
+
+    return `
+      <section class="hero">
+        <div class="container">
+          <div class="hero-card">
+            <div class="hero-logo-wrap">
+              <img class="hero-logo" src="images/logo-hero.png" width="360" height="209" alt="3388.HK — 100%官方正品，即買即發" />
+            </div>
+            <div class="hero-eyebrow">Today · 3388</div>
+            <h1>${DATA.brand.tagline}</h1>
+            <p>點卡禮品、手遊直充，一次買齊。簡潔介面、透明價錢、即時下單。</p>
+            <div class="hero-actions">
+              <a class="btn btn-primary" href="#/catalog">瀏覽全部商品</a>
+              <a class="btn btn-ghost" href="#/catalog/mobile">手遊直充</a>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <div class="container">
+        <div class="trust-strip">
+          <div class="trust-item">
+            <div class="trust-icon">⚡</div>
+            <div><strong>秒充發貨</strong><span>付款後快速處理</span></div>
+          </div>
+          <div class="trust-item">
+            <div class="trust-icon">🔒</div>
+            <div><strong>安全可靠</strong><span>加密結帳流程</span></div>
+          </div>
+          <div class="trust-item">
+            <div class="trust-icon">💬</div>
+            <div><strong>專人客服</strong><span>繁中支援協助</span></div>
+          </div>
+        </div>
+
+        <div class="chips">
+          <a class="chip active" href="#/catalog">全部</a>
+          ${DATA.categories
+            .map((c) => `<a class="chip" href="#/catalog/${c.id}">${c.icon} ${c.name}</a>`)
+            .join("")}
+        </div>
+
+        <div class="featured-row">
+          <a class="editorial-card" href="#/catalog/giftcard" style="background:linear-gradient(135deg,#0d9488,#14b8a6 50%,#5eead4)">
+            <div class="ed-label">精選專區</div>
+            <h3>熱門點卡禮品</h3>
+            <p>MyCard、PSN、iTunes 等即買即用</p>
+            <span class="ed-cta">立即選購 →</span>
+          </a>
+          <a class="editorial-card" href="#/catalog/mobile" style="background:linear-gradient(135deg,#ea580c,#fb923c 55%,#fdba74)">
+            <div class="ed-label">手遊直充</div>
+            <h3>熱門遊戲一鍵充</h3>
+            <p>王者、絕區零、鳴潮等 UID 直充</p>
+            <span class="ed-cta">去看看 →</span>
+          </a>
+        </div>
+
+        ${shelfHTML("熱門點卡", "#/catalog/giftcard", giftcards)}
+        ${shelfHTML("手遊直充", "#/catalog/mobile", mobile)}
+
+        <section class="section">
+          <div class="section-head">
+            <h2>我們在玩什麼</h2>
+            <a href="#/catalog">查看全部</a>
+          </div>
+          <div class="product-grid">
+            ${featured.map((p) => productCardHTML(p)).join("")}
+          </div>
+        </section>
+      </div>`;
+  }
+
+  function renderCatalog(categoryId) {
+    const cat = categoryId ? getCategory(categoryId) : null;
+    const list = categoryId
+      ? DATA.products.filter((p) => p.category === categoryId)
+      : DATA.products;
+
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb">
+            <a href="#/">首頁</a> / <span>${cat ? cat.name : "全部商品"}</span>
+          </div>
+          <h1>${cat ? cat.icon + " " + cat.name : "全部商品"}</h1>
+          <p>共 ${list.length} 件商品 · 價錢以港幣顯示</p>
+        </div>
+        <div class="chips">
+          <a class="chip ${!categoryId ? "active" : ""}" href="#/catalog">全部</a>
+          ${DATA.categories
+            .map(
+              (c) =>
+                `<a class="chip ${categoryId === c.id ? "active" : ""}" href="#/catalog/${c.id}">${c.icon} ${c.name}</a>`
+            )
+            .join("")}
+        </div>
+        <div class="product-grid">
+          ${list.map((p) => productCardHTML(p)).join("")}
+        </div>
+      </div>`;
+  }
+
+  function renderProduct(id) {
+    const p = getProduct(id);
+    if (!p) {
+      return `<div class="container"><div class="empty-state"><div class="emoji">😕</div><h2>找不到商品</h2><a class="btn btn-accent" href="#/catalog">返回目錄</a></div></div>`;
+    }
+    const cat = getCategory(p.category);
+    const defaultOpt = p.options[0];
+
+    return `
+      <div class="container">
+        <div class="page-banner" style="padding-bottom:0">
+          <div class="breadcrumb">
+            <a href="#/">首頁</a> /
+            <a href="#/catalog/${p.category}">${cat ? cat.name : "商品"}</a> /
+            <span>${p.name}</span>
+          </div>
+        </div>
+        <div class="detail-layout" data-product-id="${p.id}">
+          <div class="detail-media">
+            <div class="detail-thumb" style="${thumbStyle(p)}">
+              ${p.badge ? `<span class="product-badge" style="position:absolute;top:1rem;left:1rem">${p.badge}</span>` : ""}
+              ${productInitials(p.name)}
+            </div>
+          </div>
+          <div class="detail-info">
+            <div class="product-cat" style="margin-bottom:0.35rem">${cat ? cat.name : ""}</div>
+            <h1>${p.name}</h1>
+            <p class="detail-desc">${p.desc}${p.needsUid ? " 結帳時請填寫遊戲 UID／帳號。" : ""}</p>
+
+            <div class="option-label">選擇面額</div>
+            <div class="option-grid" id="option-grid">
+              ${p.options
+                .map(
+                  (o, i) => `
+                <button type="button" class="option-card ${i === 0 ? "selected" : ""}" data-option-id="${o.id}" data-sale="${o.sale}" data-list="${o.list}">
+                  <span class="opt-label">${o.label}</span>
+                  <span class="opt-price">${money(o.sale)}</span>
+                  ${o.list > o.sale ? `<span class="opt-list">${money(o.list)}</span>` : ""}
+                </button>`
+                )
+                .join("")}
+            </div>
+
+            <div class="qty-row">
+              <label>數量</label>
+              <div class="qty-control">
+                <button type="button" id="qty-minus" aria-label="減少">−</button>
+                <input type="number" id="qty-input" value="1" min="1" max="99" readonly />
+                <button type="button" id="qty-plus" aria-label="增加">+</button>
+              </div>
+            </div>
+
+            <div class="detail-total">
+              <span class="label">小計</span>
+              <span class="amount" id="detail-total">${money(defaultOpt.sale)}</span>
+            </div>
+
+            <div class="detail-actions">
+              <button type="button" class="btn btn-accent btn-lg" id="add-cart-btn">加入購物車</button>
+              <a class="btn btn-outline btn-lg" href="#/cart">查看購物車</a>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function bindProductPage() {
+    const root = $("[data-product-id]");
+    if (!root) return;
+    const productId = root.dataset.productId;
+    let selectedId = $(".option-card.selected")?.dataset.optionId;
+    let qty = 1;
+
+    function refreshTotal() {
+      const opt = getProduct(productId)?.options.find((o) => o.id === selectedId);
+      if (!opt) return;
+      $("#detail-total").textContent = money(opt.sale * qty);
+    }
+
+    $$(".option-card").forEach((btn) => {
+      btn.addEventListener("click", () => {
+        $$(".option-card").forEach((b) => b.classList.remove("selected"));
+        btn.classList.add("selected");
+        selectedId = btn.dataset.optionId;
+        refreshTotal();
+      });
+    });
+
+    $("#qty-minus")?.addEventListener("click", () => {
+      qty = Math.max(1, qty - 1);
+      $("#qty-input").value = qty;
+      refreshTotal();
+    });
+    $("#qty-plus")?.addEventListener("click", () => {
+      qty = Math.min(99, qty + 1);
+      $("#qty-input").value = qty;
+      refreshTotal();
+    });
+    $("#add-cart-btn")?.addEventListener("click", () => {
+      if (!selectedId) return;
+      addToCart(productId, selectedId, qty);
+    });
+  }
+
+  function renderCart() {
+    const cart = loadCart();
+    if (!cart.length) {
+      return `
+        <div class="container">
+          <div class="page-banner"><h1>購物車</h1></div>
+          <div class="empty-state">
+            <div class="emoji">🛒</div>
+            <h2>購物車是空的</h2>
+            <p>去挑幾件點卡或直充吧</p>
+            <a class="btn btn-accent" href="#/catalog">開始購物</a>
+          </div>
+        </div>`;
+    }
+
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb"><a href="#/">首頁</a> / <span>購物車</span></div>
+          <h1>購物車</h1>
+          <p>${cartCount()} 件商品</p>
+        </div>
+        <div class="cart-layout">
+          <div class="cart-list">
+            ${cart
+              .map(
+                (i) => `
+              <div class="cart-item" data-key="${i.key}">
+                <div class="cart-item-thumb" style="background:linear-gradient(145deg,${i.color},${i.color}99)">${productInitials(i.name)}</div>
+                <div>
+                  <h3>${i.name}</h3>
+                  <div class="meta">${i.optionLabel}</div>
+                  <div class="qty-control">
+                    <button type="button" class="qty-dec" aria-label="減少">−</button>
+                    <input type="number" value="${i.qty}" min="1" max="99" readonly />
+                    <button type="button" class="qty-inc" aria-label="增加">+</button>
+                  </div>
+                </div>
+                <div class="cart-item-right">
+                  <div class="cart-item-price">${money(i.sale * i.qty)}</div>
+                  <button type="button" class="remove-btn">移除</button>
+                </div>
+              </div>`
+              )
+              .join("")}
+          </div>
+          <aside class="cart-summary">
+            <h2>訂單摘要</h2>
+            <div class="summary-row"><span>商品小計</span><span>${money(cartSubtotal())}</span></div>
+            <div class="summary-row"><span>運費</span><span>免費（虛擬商品）</span></div>
+            <div class="summary-row total"><span>合計</span><span>${money(cartSubtotal())}</span></div>
+            <a class="btn btn-accent btn-block btn-lg" href="#/checkout">前往結帳</a>
+            <a class="btn btn-outline btn-block" href="#/catalog" style="margin-top:0.5rem">繼續購物</a>
+          </aside>
+        </div>
+      </div>`;
+  }
+
+  function bindCartPage() {
+    $$(".cart-item").forEach((row) => {
+      const key = row.dataset.key;
+      row.querySelector(".qty-dec")?.addEventListener("click", () => {
+        const item = loadCart().find((i) => i.key === key);
+        if (item) {
+          updateQty(key, item.qty - 1);
+          render();
+        }
+      });
+      row.querySelector(".qty-inc")?.addEventListener("click", () => {
+        const item = loadCart().find((i) => i.key === key);
+        if (item) {
+          updateQty(key, item.qty + 1);
+          render();
+        }
+      });
+      row.querySelector(".remove-btn")?.addEventListener("click", () => {
+        removeItem(key);
+        toast("已從購物車移除");
+        render();
+      });
+    });
+  }
+
+  function renderCheckout() {
+    const cart = loadCart();
+    if (!cart.length) {
+      navigate("/cart");
+      return "";
+    }
+
+    if (!currentUser) {
+      return `
+        <div class="container">
+          <div class="page-banner">
+            <div class="breadcrumb"><a href="#/">首頁</a> / <a href="#/cart">購物車</a> / <span>結帳</span></div>
+            <h1>結帳</h1>
+          </div>
+          <div class="empty-state member-gate">
+            <div class="emoji">🔐</div>
+            <h2>請先登入再結帳</h2>
+            <p>登入後訂單會保存到你的會員中心，方便查閱記錄。</p>
+            <div style="display:flex;gap:0.75rem;justify-content:center;flex-wrap:wrap">
+              <a class="btn btn-accent" href="#/login">登入</a>
+              <a class="btn btn-outline" href="#/register">註冊</a>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    const needsUid = cart.some((i) => i.needsUid);
+
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb"><a href="#/">首頁</a> / <a href="#/cart">購物車</a> / <span>結帳</span></div>
+          <h1>結帳</h1>
+          <p>以 <strong>${escapeHtml(currentUser.username)}</strong> 下單 · 港幣（HK$）線上支付</p>
+        </div>
+        <form class="checkout-layout" id="checkout-form">
+          <div class="form-card">
+            <h2>聯絡與帳號資料</h2>
+            <div class="form-group">
+              <label>電郵 <span class="req">*</span></label>
+              <input type="email" name="email" required placeholder="you@example.com" autocomplete="email" />
+              <div class="form-hint">訂單確認與卡密將發至此電郵</div>
+            </div>
+            <div class="form-group">
+              <label>遊戲 UID／帳號${needsUid ? ' <span class="req">*</span>' : "（選填）"}</label>
+              <input type="text" name="uid" ${needsUid ? "required" : ""} placeholder="直充商品請填寫遊戲 UID" />
+              <div class="form-hint">${needsUid ? "購物車含直充商品，必須填寫" : "點卡類商品可留空"}</div>
+            </div>
+            <div class="form-group">
+              <label>備註（選填）</label>
+              <textarea name="note" placeholder="其他說明…"></textarea>
+            </div>
+
+            <h2 style="margin-top:1.5rem">付款方式</h2>
+            <div class="pay-methods" id="pay-methods">
+              <label class="pay-option selected">
+                <input type="radio" name="payment" value="alipay_hk" checked />
+                <div><strong>AlipayHK</strong><span>支付寶香港 · 行政費 2.2%</span></div>
+              </label>
+              <label class="pay-option">
+                <input type="radio" name="payment" value="boost" />
+                <div><strong>Boost</strong><span>馬來西亞電子錢包 · 行政費 2.5%</span></div>
+              </label>
+              <label class="pay-option">
+                <input type="radio" name="payment" value="tng" />
+                <div><strong>Touch'n Go eWallet</strong><span>電子錢包 · 行政費 2.5%</span></div>
+              </label>
+              <label class="pay-option" data-qfpay-option>
+                <input type="radio" name="payment" value="qfpay_fps" />
+                <div><strong>FPS（轉數快）</strong><span>掃碼或銀行 App · 行政費 1.2%</span></div>
+              </label>
+              <label class="pay-option" data-qfpay-option>
+                <input type="radio" name="payment" value="qfpay_payme" />
+                <div><strong>PayMe</strong><span>HSBC PayMe · 行政費 1.2%</span></div>
+              </label>
+              <label class="pay-option" data-qfpay-option>
+                <input type="radio" name="payment" value="qfpay_wechat" />
+                <div><strong>WeChat Pay（微信支付）</strong><span>掃碼／手機 · 行政費 1.2%</span></div>
+              </label>
+            </div>
+            <div class="demo-note" id="checkout-qfpay-limit" hidden>單筆超過 HK$2000 請使用其他支付方式</div>
+            <div class="demo-note" id="checkout-pay-hint">🔒 提交後會前往對應支付頁完成付款（港幣 HKD）。Antom 錢包與 QFPay 均另收行政費。</div>
+            <div class="auth-error" id="checkout-error" hidden></div>
+          </div>
+
+          <aside class="order-side">
+            <h2>訂單內容</h2>
+            ${cart
+              .map(
+                (i) => `
+              <div class="order-line">
+                <div>
+                  <div class="name">${escapeHtml(i.name)}</div>
+                  <div class="sub">${escapeHtml(i.optionLabel)} × ${i.qty}</div>
+                </div>
+                <div>${money(i.sale * i.qty)}</div>
+              </div>`
+              )
+              .join("")}
+            <div class="summary-row" style="margin-top:1rem">
+              <span>商品小計</span><span id="checkout-subtotal">${money(cartSubtotal())}</span>
+            </div>
+            <div class="summary-row" id="checkout-fee-row" hidden>
+              <span id="checkout-fee-label">行政費</span><span id="checkout-fee">${money(0)}</span>
+            </div>
+            <div class="summary-row total">
+              <span>合計</span><span id="checkout-grand">${money(cartSubtotal())}</span>
+            </div>
+            <button type="submit" class="btn btn-accent btn-block btn-lg" id="checkout-submit">立即付款</button>
+            <a class="btn btn-outline btn-block" href="#/cart" style="margin-top:0.5rem">返回購物車</a>
+          </aside>
+        </form>
+      </div>`;
+  }
+
+  function bindCheckoutPage() {
+    const sub = cartSubtotal();
+    const qfAmt = qfpayAmounts(sub);
+    const qfBlocked = qfAmt.overLimit;
+
+    function refreshCheckoutTotals() {
+      const selected = document.querySelector('input[name="payment"]:checked');
+      const method = selected ? selected.value : "alipay_hk";
+      const feeInfo = checkoutFeeForMethod(method, sub);
+      const feeRow = $("#checkout-fee-row");
+      const feeEl = $("#checkout-fee");
+      const feeLabel = $("#checkout-fee-label");
+      const grandEl = $("#checkout-grand");
+      const hint = $("#checkout-pay-hint");
+      if (feeInfo.applies) {
+        if (feeRow) feeRow.hidden = false;
+        if (feeLabel) feeLabel.textContent = feeInfo.feeLabel;
+        if (feeEl) feeEl.textContent = money(feeInfo.adminFee);
+        if (grandEl) grandEl.textContent = money(feeInfo.charge);
+        if (hint) {
+          if (QFPAY_METHODS.has(method)) {
+            hint.textContent = "🔒 QFPay 付款含行政費 1.2%，提交後前往支付頁或顯示二維碼（港幣 HKD）。";
+          } else {
+            hint.textContent = "🔒 Antom 付款含" + feeInfo.feeLabel + "，提交後前往支付頁完成付款（港幣 HKD）。";
+          }
+        }
+      } else {
+        if (feeRow) feeRow.hidden = true;
+        if (feeEl) feeEl.textContent = money(0);
+        if (grandEl) grandEl.textContent = money(sub);
+        if (hint) hint.textContent = "🔒 提交後會前往對應支付頁完成付款（港幣 HKD）。";
+      }
+    }
+
+    // Disable QFPay when over HK$2000
+    const limitNote = $("#checkout-qfpay-limit");
+    $$("[data-qfpay-option]").forEach((label) => {
+      const input = label.querySelector("input");
+      if (qfBlocked) {
+        label.classList.add("pay-option-disabled");
+        label.setAttribute("aria-disabled", "true");
+        if (input) {
+          input.disabled = true;
+          if (input.checked) {
+            input.checked = false;
+            const fallback = document.querySelector('input[name="payment"][value="alipay_hk"]');
+            if (fallback) {
+              fallback.checked = true;
+              fallback.closest(".pay-option")?.classList.add("selected");
+            }
+            label.classList.remove("selected");
+          }
+        }
+      } else {
+        label.classList.remove("pay-option-disabled");
+        label.removeAttribute("aria-disabled");
+        if (input) input.disabled = false;
+      }
+    });
+    if (limitNote) {
+      limitNote.hidden = !qfBlocked;
+    }
+
+    $$(".pay-option").forEach((label) => {
+      label.addEventListener("click", (ev) => {
+        const input = label.querySelector("input");
+        if (!input || input.disabled) {
+          ev.preventDefault();
+          return;
+        }
+        $$(".pay-option").forEach((l) => l.classList.remove("selected"));
+        label.classList.add("selected");
+        input.checked = true;
+        refreshCheckoutTotals();
+      });
+    });
+    refreshCheckoutTotals();
+
+    $("#checkout-form")?.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const form = e.target;
+      const errEl = $("#checkout-error");
+      const btn = $("#checkout-submit");
+      if (errEl) { errEl.hidden = true; errEl.textContent = ""; }
+
+      if (!currentUser) {
+        navigate("/login");
+        return;
+      }
+
+      const email = form.email.value.trim();
+      const uid = form.uid.value.trim();
+      const note = form.note.value.trim();
+      const paymentInput = form.querySelector('input[name="payment"]:checked');
+      const payment = paymentInput ? paymentInput.value : "";
+      const cart = loadCart();
+      if (!cart.length) {
+        navigate("/cart");
+        return;
+      }
+      if (QFPAY_METHODS.has(payment) && qfpayAmounts(cartSubtotal()).overLimit) {
+        if (errEl) {
+          errEl.textContent = "單筆超過 HK$2000 請使用其他支付方式";
+          errEl.hidden = false;
+        }
+        return;
+      }
+
+      if (btn) { btn.disabled = true; btn.textContent = "建立支付中…"; }
+
+      try {
+        const { ok, body, status } = await api("/orders", {
+          method: "POST",
+          body: JSON.stringify({
+            email,
+            game_uid: uid,
+            note,
+            payment,
+            items: cart.map((i) => ({
+              productId: i.productId,
+              name: i.name,
+              optionLabel: i.optionLabel,
+              qty: i.qty,
+              sale: i.sale,
+            })),
+          }),
+        });
+        if (!ok) {
+          if (status === 401) {
+            currentUser = null;
+            updateAuthUI();
+            toast("請重新登入");
+            navigate("/login");
+            return;
+          }
+          if (errEl) {
+            errEl.textContent = (body && body.error) || "建立訂單失敗";
+            errEl.hidden = false;
+          } else {
+            toast((body && body.error) || "建立訂單失敗");
+          }
+          return;
+        }
+
+        localStorage.setItem(ORDER_KEY, JSON.stringify(body));
+        clearCart();
+        if (body && body.pay_qrcode && !body.redirect) {
+          toast("請掃碼完成付款");
+          navigate("/pay-result/" + encodeURIComponent(body.id));
+          return;
+        }
+        if (body && body.pay_url && (body.redirect !== false)) {
+          toast("正在前往支付…");
+          if (btn) { btn.textContent = "前往支付…"; }
+          window.location.href = body.pay_url;
+          return;
+        }
+        toast("訂單已建立");
+        navigate("/pay-result/" + encodeURIComponent(body.id));
+      } catch {
+        if (errEl) {
+          errEl.textContent = "無法連線伺服器，請稍後再試";
+          errEl.hidden = false;
+        }
+      } finally {
+        if (btn) { btn.disabled = false; btn.textContent = "立即付款"; }
+      }
+    });
+  }
+
+  function renderLogin() {
+    if (currentUser) {
+      navigate("/");
+      return "";
+    }
+    return `
+      <div class="container">
+        <div class="auth-page">
+          <div class="form-card auth-card">
+            <h1>登入</h1>
+            <p class="auth-lead">使用你的英文用戶名登入 3388</p>
+            <form id="auth-form" data-mode="login" novalidate>
+              <div class="form-group">
+                <label>用戶名 <span class="req">*</span></label>
+                <input type="text" name="username" required autocomplete="username"
+                  placeholder="your_name" pattern="[A-Za-z0-9_]{3,20}" maxlength="20" />
+                <div class="form-hint">3–20 個英文字母、數字或底線</div>
+              </div>
+              <div class="form-group">
+                <label>密碼 <span class="req">*</span></label>
+                <input type="password" name="password" required autocomplete="current-password"
+                  placeholder="至少 6 個字元" minlength="6" />
+              </div>
+              <div class="auth-error" id="auth-error" hidden></div>
+              <button type="submit" class="btn btn-accent btn-block btn-lg" id="auth-submit">登入</button>
+            </form>
+            <p class="auth-switch">還沒有帳號？ <a href="#/register">立即註冊</a></p>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderRegister() {
+    if (currentUser) {
+      navigate("/");
+      return "";
+    }
+    return `
+      <div class="container">
+        <div class="auth-page">
+          <div class="form-card auth-card">
+            <h1>註冊</h1>
+            <p class="auth-lead">自訂英文用戶名，無需電郵驗證</p>
+            <form id="auth-form" data-mode="register" novalidate>
+              <div class="form-group">
+                <label>用戶名 <span class="req">*</span></label>
+                <input type="text" name="username" required autocomplete="username"
+                  placeholder="your_name" pattern="[A-Za-z0-9_]{3,20}" maxlength="20" />
+                <div class="form-hint">3–20 個英文字母、數字或底線 · 不區分大小寫唯一</div>
+              </div>
+              <div class="form-group">
+                <label>密碼 <span class="req">*</span></label>
+                <input type="password" name="password" required autocomplete="new-password"
+                  placeholder="至少 6 個字元" minlength="6" />
+              </div>
+              <div class="form-group">
+                <label>確認密碼 <span class="req">*</span></label>
+                <input type="password" name="password2" required autocomplete="new-password"
+                  placeholder="再輸入一次" minlength="6" />
+              </div>
+              <div class="auth-error" id="auth-error" hidden></div>
+              <button type="submit" class="btn btn-accent btn-block btn-lg" id="auth-submit">建立帳號</button>
+            </form>
+            <p class="auth-switch">已有帳號？ <a href="#/login">前往登入</a></p>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function bindAuthForm() {
+    const form = $("#auth-form");
+    if (!form) return;
+    const mode = form.dataset.mode;
+    const errEl = $("#auth-error");
+    const btn = $("#auth-submit");
+
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errEl.hidden = true;
+      errEl.textContent = "";
+      const username = form.username.value.trim();
+      const password = form.password.value;
+      const USERNAME_RE = /^[A-Za-z0-9_]{3,20}$/;
+
+      if (!USERNAME_RE.test(username)) {
+        errEl.textContent = "用戶名須為 3–20 個英文字母、數字或底線";
+        errEl.hidden = false;
+        return;
+      }
+      if (password.length < 6) {
+        errEl.textContent = "密碼至少 6 個字元";
+        errEl.hidden = false;
+        return;
+      }
+      if (mode === "register") {
+        const password2 = form.password2.value;
+        if (password !== password2) {
+          errEl.textContent = "兩次輸入的密碼不一致";
+          errEl.hidden = false;
+          return;
+        }
+      }
+
+      btn.disabled = true;
+      btn.textContent = mode === "register" ? "註冊中…" : "登入中…";
+      try {
+        const path = mode === "register" ? "/register" : "/login";
+        const { ok, body, status } = await api(path, {
+          method: "POST",
+          body: JSON.stringify({ username, password }),
+        });
+        if (!ok) {
+          errEl.textContent = (body && body.error) || (status === 0 ? "無法連線伺服器" : "操作失敗");
+          errEl.hidden = false;
+          return;
+        }
+        currentUser = { username: body.username, order_count: body.order_count || 0 };
+        updateAuthUI();
+        toast(mode === "register" ? "註冊成功，已自動登入" : "登入成功");
+        navigate("/account");
+      } catch (err) {
+        errEl.textContent = "無法連線伺服器，請稍後再試";
+        errEl.hidden = false;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = mode === "register" ? "建立帳號" : "登入";
+      }
+    });
+  }
+
+  function formatWhen(isoOrSql) {
+    if (!isoOrSql) return "—";
+    // SQLite datetime('now') is UTC-ish without Z; treat as UTC if no zone
+    let s = String(isoOrSql);
+    if (/^\d{4}-\d{2}-\d{2} /.test(s) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      s = s.replace(" ", "T") + "Z";
+    }
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return String(isoOrSql);
+    return d.toLocaleString("zh-HK", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  }
+
+  function statusBadge(status, label) {
+    const cls =
+      status === "completed" ? "ok" : status === "paid" ? "paid" : "pending";
+    return `<span class="status-badge status-${cls}">${escapeHtml(label || status)}</span>`;
+  }
+
+  function requireAuthPage(title) {
+    return `
+      <div class="container">
+        <div class="empty-state member-gate">
+          <div class="emoji">🔐</div>
+          <h2>請先登入</h2>
+          <p>登入後即可查看${escapeHtml(title)}</p>
+          <div style="display:flex;gap:0.75rem;justify-content:center;flex-wrap:wrap">
+            <a class="btn btn-accent" href="#/login">登入</a>
+            <a class="btn btn-outline" href="#/register">註冊</a>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function memberNav(active) {
+    return `
+      <aside class="member-side">
+        <div class="member-side-head">
+          <div class="member-avatar">${escapeHtml((currentUser.username || "?").slice(0, 1).toUpperCase())}</div>
+          <div>
+            <div class="member-name">${escapeHtml(currentUser.username)}</div>
+            <div class="member-sub">會員中心</div>
+          </div>
+        </div>
+        <nav class="member-nav">
+          <a class="${active === "account" ? "active" : ""}" href="#/account">帳戶概覽</a>
+          <a class="${active === "orders" ? "active" : ""}" href="#/orders">我的訂單</a>
+          <a class="${active === "password" ? "active" : ""}" href="#/account/password">修改密碼</a>
+        </nav>
+      </aside>`;
+  }
+
+  async function renderAccount(section) {
+    if (!currentUser) return requireAuthPage("會員中心");
+
+    if (section === "password") {
+      return `
+        <div class="container">
+          <div class="page-banner">
+            <div class="breadcrumb"><a href="#/">首頁</a> / <a href="#/account">會員中心</a> / <span>修改密碼</span></div>
+            <h1>修改密碼</h1>
+          </div>
+          <div class="member-layout">
+            ${memberNav("password")}
+            <div class="form-card member-main">
+              <h2>變更登入密碼</h2>
+              <p class="auth-lead" style="margin-bottom:1.25rem">用戶名不可更改：${escapeHtml(currentUser.username)}</p>
+              <form id="password-form" novalidate>
+                <div class="form-group">
+                  <label>舊密碼 <span class="req">*</span></label>
+                  <input type="password" name="old_password" required autocomplete="current-password" minlength="6" />
+                </div>
+                <div class="form-group">
+                  <label>新密碼 <span class="req">*</span></label>
+                  <input type="password" name="new_password" required autocomplete="new-password" minlength="6" placeholder="至少 6 個字元" />
+                </div>
+                <div class="form-group">
+                  <label>確認新密碼 <span class="req">*</span></label>
+                  <input type="password" name="new_password2" required autocomplete="new-password" minlength="6" />
+                </div>
+                <div class="auth-error" id="pw-error" hidden></div>
+                <div class="auth-ok" id="pw-ok" hidden></div>
+                <button type="submit" class="btn btn-accent btn-lg" id="pw-submit">儲存新密碼</button>
+              </form>
+            </div>
+          </div>
+        </div>`;
+    }
+
+    let orderCount = currentUser.order_count;
+    if (typeof orderCount !== "number") {
+      try {
+        const { ok, body } = await api("/me");
+        if (ok) {
+          orderCount = body.order_count || 0;
+          currentUser.order_count = orderCount;
+        } else orderCount = 0;
+      } catch {
+        orderCount = 0;
+      }
+    }
+
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb"><a href="#/">首頁</a> / <span>會員中心</span></div>
+          <h1>會員中心</h1>
+          <p>歡迎回來，${escapeHtml(currentUser.username)}</p>
+        </div>
+        <div class="member-layout">
+          ${memberNav("account")}
+          <div class="member-main">
+            <div class="member-stats">
+              <div class="stat-card">
+                <div class="stat-label">訂單數</div>
+                <div class="stat-value">${orderCount}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">帳戶</div>
+                <div class="stat-value stat-user">${escapeHtml(currentUser.username)}</div>
+              </div>
+              <div class="stat-card">
+                <div class="stat-label">狀態</div>
+                <div class="stat-value" style="color:var(--success);font-size:1.25rem">已登入</div>
+              </div>
+            </div>
+            <div class="member-quick">
+              <a class="quick-card" href="#/orders">
+                <span class="qc-icon">📦</span>
+                <div><strong>訂單記錄</strong><span>查看歷史訂單與狀態</span></div>
+              </a>
+              <a class="quick-card" href="#/account/password">
+                <span class="qc-icon">🔑</span>
+                <div><strong>個人資料</strong><span>用戶名唯讀 · 可改密碼</span></div>
+              </a>
+              <a class="quick-card" href="#/catalog">
+                <span class="qc-icon">🛒</span>
+                <div><strong>繼續購物</strong><span>瀏覽點卡與直充</span></div>
+              </a>
+            </div>
+            <div class="form-card" style="margin-top:1.25rem">
+              <h2>個人資料</h2>
+              <div class="confirm-details" style="margin-top:0.75rem">
+                <div class="row"><span>用戶名</span><span>${escapeHtml(currentUser.username)}</span></div>
+                <div class="row"><span>驗證</span><span>無需電郵驗證</span></div>
+              </div>
+              <a class="btn btn-outline" href="#/account/password" style="margin-top:1rem">修改密碼</a>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function bindPasswordForm() {
+    const form = $("#password-form");
+    if (!form) return;
+    const errEl = $("#pw-error");
+    const okEl = $("#pw-ok");
+    const btn = $("#pw-submit");
+    form.addEventListener("submit", async (e) => {
+      e.preventDefault();
+      errEl.hidden = true;
+      okEl.hidden = true;
+      const old_password = form.old_password.value;
+      const new_password = form.new_password.value;
+      const new_password2 = form.new_password2.value;
+      if (new_password.length < 6) {
+        errEl.textContent = "新密碼至少 6 個字元";
+        errEl.hidden = false;
+        return;
+      }
+      if (new_password !== new_password2) {
+        errEl.textContent = "兩次輸入的新密碼不一致";
+        errEl.hidden = false;
+        return;
+      }
+      btn.disabled = true;
+      btn.textContent = "儲存中…";
+      try {
+        const { ok, body } = await api("/change-password", {
+          method: "POST",
+          body: JSON.stringify({ old_password, new_password }),
+        });
+        if (!ok) {
+          errEl.textContent = (body && body.error) || "修改失敗";
+          errEl.hidden = false;
+          return;
+        }
+        form.reset();
+        okEl.textContent = "密碼已更新";
+        okEl.hidden = false;
+        toast("密碼已更新");
+      } catch {
+        errEl.textContent = "無法連線伺服器";
+        errEl.hidden = false;
+      } finally {
+        btn.disabled = false;
+        btn.textContent = "儲存新密碼";
+      }
+    });
+  }
+
+  function loadHiddenOrders() {
+    try {
+      const arr = JSON.parse(localStorage.getItem(HIDDEN_ORDERS_KEY) || "[]");
+      return Array.isArray(arr) ? arr.map(String) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  function hideOrderLocally(orderId) {
+    const ids = loadHiddenOrders();
+    if (!ids.includes(orderId)) {
+      ids.push(orderId);
+      localStorage.setItem(HIDDEN_ORDERS_KEY, JSON.stringify(ids));
+    }
+  }
+
+  function formatWhenFull(isoOrSql) {
+    if (!isoOrSql) return "—";
+    let s = String(isoOrSql);
+    if (/^\d{4}-\d{2}-\d{2} /.test(s) && !/[zZ]|[+-]\d{2}:?\d{2}$/.test(s)) {
+      s = s.replace(" ", "T") + "Z";
+    }
+    const d = new Date(s);
+    if (Number.isNaN(d.getTime())) return String(isoOrSql);
+    const parts = new Intl.DateTimeFormat("en-CA", {
+      timeZone: "Asia/Shanghai",
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+      second: "2-digit",
+      hour12: false,
+    }).formatToParts(d);
+    const get = (t) => parts.find((p) => p.type === t)?.value || "00";
+    return `${get("year")}-${get("month")}-${get("day")} ${get("hour")}:${get("minute")}:${get("second")}`;
+  }
+
+  function orderTabKey(status) {
+    const s = String(status || "").toLowerCase();
+    if (s === "pending" || s === "unpaid" || s === "timeout" || s === "failed") return "pending";
+    if (s === "shipping" || s === "sending") return "shipping";
+    if (s === "refunded" || s === "refund") return "refunded";
+    if (s === "paid" || s === "completed" || s === "success") return "success";
+    return "other";
+  }
+
+  function orderPayStatusText(o) {
+    const tab = orderTabKey(o.status);
+    if (tab === "pending") return o.status_label || "待付款";
+    if (tab === "refunded") return "已退款";
+    if (tab === "shipping") return "發送中";
+    const pay = o.payment_label || o.payment_method || "";
+    return pay ? `已以 ${pay} 付款` : o.status_label || "已付款";
+  }
+
+  function secondaryOrderId(orderId) {
+    let h = 0;
+    const s = String(orderId || "");
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) >>> 0;
+    return "C" + String(100000000 + (h % 900000000));
+  }
+
+  function demoCardCodes(order) {
+    const items = order.items || [];
+    const codes = [];
+    let n = 0;
+    for (const it of items) {
+      const qty = Math.min(99, Math.max(1, Number(it.qty) || 1));
+      for (let i = 0; i < qty; i++) {
+        n += 1;
+        let h = 0;
+        const seed = `${order.id}:${it.product_id}:${i}`;
+        for (let j = 0; j < seed.length; j++) h = (h * 33 + seed.charCodeAt(j)) >>> 0;
+        const part = (len) => {
+          const chars = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789";
+          let out = "";
+          let x = h + out.length * 17 + len * 13;
+          for (let k = 0; k < len; k++) {
+            x = (x * 1103515245 + 12345) >>> 0;
+            out += chars[x % chars.length];
+          }
+          return out;
+        };
+        codes.push({
+          title: it.title || "商品",
+          denom: it.denomination || "",
+          code: `${part(4)}-${part(4)}-${part(4)}-${part(4)}`,
+        });
+      }
+    }
+    if (!codes.length) {
+      codes.push({ title: "演示卡密", denom: "", code: "DEMO-3388-0001-0001" });
+    }
+    return codes;
+  }
+
+  function productThumbHtml(productId, title) {
+    const product = productId ? getProduct(productId) : null;
+    if (product) {
+      return `<div class="seagm-thumb" style="${thumbStyle(product)}"><span>${escapeHtml(productInitials(product.name))}</span></div>`;
+    }
+    const initials = productInitials(title || "OK");
+    return `<div class="seagm-thumb seagm-thumb-fallback"><span>${escapeHtml(initials)}</span></div>`;
+  }
+
+  function renderOrderSeagmCard(o) {
+    const items = o.items || [];
+    const tab = orderTabKey(o.status);
+    const isSuccess = tab === "success";
+    const isPending = tab === "pending";
+    const payText = orderPayStatusText(o);
+    const secId = isSuccess || tab === "shipping" ? secondaryOrderId(o.id) : "";
+
+    const lines =
+      items.length > 0
+        ? items
+            .map((it) => {
+              const actions = [];
+              if (isSuccess) {
+                actions.push(
+                  `<button type="button" class="seagm-btn-getcard" data-get-card="${escapeHtml(o.id)}">獲取卡</button>`
+                );
+                actions.push(
+                  `<button type="button" class="seagm-link-rebuy" data-rebuy-order="${escapeHtml(o.id)}" data-rebuy-product="${escapeHtml(it.product_id || "")}" data-rebuy-denom="${escapeHtml(it.denomination || "")}" data-rebuy-qty="${it.qty || 1}">再次購買</button>`
+                );
+                actions.push(`<div class="seagm-status-ok">交易成功</div>`);
+              } else if (isPending) {
+                if (o.pay_qrcode) {
+                  actions.push(
+                    `<a class="seagm-btn-getcard" href="#/pay-result/${encodeURIComponent(o.id)}">掃碼付款</a>`
+                  );
+                } else if (o.pay_url) {
+                  actions.push(
+                    `<a class="seagm-btn-getcard" href="${escapeHtml(o.pay_url)}">前往支付</a>`
+                  );
+                }
+                actions.push(
+                  `<button type="button" class="seagm-link-rebuy" data-rebuy-order="${escapeHtml(o.id)}" data-rebuy-product="${escapeHtml(it.product_id || "")}" data-rebuy-denom="${escapeHtml(it.denomination || "")}" data-rebuy-qty="${it.qty || 1}">再次購買</button>`
+                );
+                actions.push(`<div class="seagm-status-muted">${escapeHtml(o.status_label || "待付款")}</div>`);
+              } else if (tab === "shipping") {
+                actions.push(`<div class="seagm-status-ship">發送中</div>`);
+                actions.push(
+                  `<button type="button" class="seagm-link-rebuy" data-rebuy-order="${escapeHtml(o.id)}" data-rebuy-product="${escapeHtml(it.product_id || "")}" data-rebuy-denom="${escapeHtml(it.denomination || "")}" data-rebuy-qty="${it.qty || 1}">再次購買</button>`
+                );
+              } else if (tab === "refunded") {
+                actions.push(`<div class="seagm-status-muted">已退款</div>`);
+              } else {
+                actions.push(
+                  `<button type="button" class="seagm-link-rebuy" data-rebuy-order="${escapeHtml(o.id)}" data-rebuy-product="${escapeHtml(it.product_id || "")}" data-rebuy-denom="${escapeHtml(it.denomination || "")}" data-rebuy-qty="${it.qty || 1}">再次購買</button>`
+                );
+              }
+              return `
+              <div class="seagm-line">
+                ${secId ? `<div class="seagm-sec-id">${escapeHtml(secId)}</div>` : `<div class="seagm-sec-id seagm-sec-empty"></div>`}
+                ${productThumbHtml(it.product_id, it.title)}
+                <div class="seagm-prod">
+                  <div class="seagm-prod-name">${escapeHtml(it.title || "商品")}</div>
+                  <div class="seagm-prod-sub">${escapeHtml(it.denomination || "")}</div>
+                </div>
+                <div class="seagm-price-qty">
+                  <div class="seagm-unit">${money(it.unit_price)}</div>
+                  <div class="seagm-qty">× ${it.qty || 1}</div>
+                </div>
+                <div class="seagm-actions">${actions.join("")}</div>
+              </div>`;
+            })
+            .join("")
+        : `<div class="seagm-line seagm-line-empty"><div class="seagm-prod"><div class="seagm-prod-name">（無商品明細）</div></div></div>`;
+
+    return `
+      <article class="seagm-order-card" data-order-id="${escapeHtml(o.id)}" data-status-tab="${tab}" data-search="${escapeHtml(
+        ((o.id || "") + " " + items.map((i) => (i.title || "") + " " + (i.denomination || "")).join(" ")).toLowerCase()
+      )}">
+        <div class="seagm-card-head">
+          <div class="seagm-head-left">
+            <span class="seagm-pay-label">訂單</span>
+            <a class="seagm-order-id" href="#/orders/${encodeURIComponent(o.id)}">${escapeHtml(o.id)}</a>
+            <span class="seagm-time">${escapeHtml(formatWhenFull(o.created_at))}</span>
+          </div>
+          <div class="seagm-head-right">
+            <span class="seagm-pay-status">${escapeHtml(payText)}</span>
+            <span class="seagm-total">總計 ${money(o.total)}</span>
+            <button type="button" class="seagm-trash" data-hide-order="${escapeHtml(o.id)}" title="刪除記錄" aria-label="刪除記錄">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><polyline points="3 6 5 6 21 6"/><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"/></svg>
+            </button>
+          </div>
+        </div>
+        <div class="seagm-card-body">${lines}</div>
+      </article>`;
+  }
+
+
+  async function renderPayResult(orderId) {
+    if (!currentUser) return requireAuthPage("付款結果");
+    let order = null;
+    let loadErr = "";
+    let syncNote = "正在確認付款狀態…";
+
+    try {
+      const inq = await api("/orders/" + encodeURIComponent(orderId) + "/inquire-payment", {
+        method: "POST",
+        body: "{}",
+      });
+      if (inq.ok && inq.body && inq.body.order) {
+        order = inq.body.order;
+        if (inq.body.already_paid || order.status === "paid" || order.status === "completed") {
+          syncNote = "付款成功，訂單已更新。";
+        } else if (order.status === "failed") {
+          syncNote = "付款未完成或已失敗，請重新下單。";
+        } else if (inq.body.qfpay_payment_status) {
+          syncNote = "QFPay 狀態：" + inq.body.qfpay_payment_status + "（若剛完成付款，請稍候刷新）";
+        } else if (inq.body.antom_payment_status) {
+          syncNote = "支付狀態：" + inq.body.antom_payment_status + "（若剛完成付款，請稍候刷新）";
+        } else {
+          syncNote = "尚未收到付款確認。若你已付款，請稍後在「我的訂單」查看，或再按重新確認。";
+        }
+      } else {
+        const { ok, body, status } = await api("/orders/" + encodeURIComponent(orderId));
+        if (ok) order = body;
+        else loadErr = status === 404 ? "找不到此訂單" : ((body && body.error) || "無法載入");
+      }
+    } catch {
+      loadErr = "無法連線伺服器";
+    }
+
+    if (!order) {
+      return `
+        <div class="container">
+          <div class="empty-state">
+            <div class="emoji">😕</div>
+            <h2>${escapeHtml(loadErr || "找不到訂單")}</h2>
+            <a class="btn btn-accent" href="#/orders">返回訂單列表</a>
+          </div>
+        </div>`;
+    }
+
+    const paid = order.status === "paid" || order.status === "completed";
+    const failed = order.status === "failed";
+    const badge = paid
+      ? statusBadge("paid", "已付款")
+      : failed
+        ? statusBadge("pending", "付款失敗")
+        : statusBadge("pending", "待付款");
+
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb"><a href="#/">首頁</a> / <a href="#/orders">我的訂單</a> / <span>付款結果</span></div>
+          <h1>付款結果</h1>
+        </div>
+        <div class="order-success-card">
+          <div class="emoji">${paid ? "✅" : failed ? "⚠️" : "⏳"}</div>
+          <h2>${paid ? "付款成功" : failed ? "付款未成功" : "等待付款確認"}</h2>
+          <p>${escapeHtml(syncNote)}</p>
+          ${!paid && !failed && order.pay_qrcode ? `
+          <div class="pay-qr-box">
+            <p class="pay-qr-title">請使用對應 App 掃描二維碼完成付款</p>
+            <img class="pay-qr-img" alt="付款二維碼" width="220" height="220"
+              src="https://api.qrserver.com/v1/create-qr-code/?size=220x220&amp;data=${encodeURIComponent(order.pay_qrcode)}" />
+            <p class="pay-qr-hint">付款完成後按「重新確認付款」</p>
+          </div>` : ""}
+          <div class="order-meta-box">
+            <div class="label">訂單編號</div>
+            <div class="value mono">${escapeHtml(order.id)}</div>
+            <div class="row"><span>狀態</span><span>${badge}</span></div>
+            <div class="row"><span>付款方式</span><span>${escapeHtml(order.payment_label || order.payment_method || "")}</span></div>
+            ${Number(order.admin_fee) > 0 ? `
+            <div class="row"><span>商品小計</span><span>${money(order.subtotal != null ? order.subtotal : (order.total - order.admin_fee))}</span></div>
+            <div class="row"><span>${escapeHtml(orderFeeLabel(order))}</span><span>${money(order.admin_fee)}</span></div>` : ""}
+            <div class="row"><span>合計</span><span><strong>${money(order.total)}</strong></span></div>
+          </div>
+          <div style="display:flex;gap:0.75rem;flex-wrap:wrap;margin-top:1.25rem">
+            ${!paid && !failed && order.pay_url ? `<a class="btn btn-accent" href="${escapeHtml(order.pay_url)}" target="_blank" rel="noopener">繼續前往支付</a>` : ""}
+            <button type="button" class="btn btn-outline" id="pay-result-refresh">重新確認付款</button>
+            <a class="btn ${paid ? "btn-accent" : "btn-outline"}" href="#/orders/${encodeURIComponent(order.id)}">查看訂單</a>
+            <a class="btn btn-outline" href="#/orders">我的訂單</a>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function bindPayResultPage(orderId) {
+    $("#pay-result-refresh")?.addEventListener("click", () => {
+      render();
+    });
+  }
+
+  async function renderOrders() {
+    if (!currentUser) return requireAuthPage("我的訂單");
+
+    let orders = [];
+    let loadErr = "";
+    try {
+      const { ok, body } = await api("/orders");
+      if (!ok) loadErr = (body && body.error) || "無法載入訂單";
+      else orders = body.orders || [];
+    } catch {
+      loadErr = "無法連線伺服器";
+    }
+    lastOrdersCache = orders;
+
+    const hidden = new Set(loadHiddenOrders());
+    const visible = orders.filter((o) => !hidden.has(String(o.id)));
+
+    const counts = { all: visible.length, pending: 0, shipping: 0, success: 0, refunded: 0 };
+    for (const o of visible) {
+      const t = orderTabKey(o.status);
+      if (counts[t] != null) counts[t] += 1;
+    }
+
+    const listHtml = loadErr
+      ? `<div class="empty-state"><h2>${escapeHtml(loadErr)}</h2></div>`
+      : !visible.length
+        ? `<div class="empty-state" style="padding:2rem 1rem">
+            <div class="emoji">📦</div>
+            <h2>尚無訂單</h2>
+            <p>下單後會顯示在這裡</p>
+            <a class="btn btn-accent" href="#/catalog">去逛逛</a>
+          </div>`
+        : `<div class="seagm-order-list" id="seagm-order-list">
+            ${visible.map(renderOrderSeagmCard).join("")}
+          </div>
+          <div class="seagm-empty-filter" id="seagm-empty-filter" hidden>
+            <div class="empty-state" style="padding:2rem 1rem">
+              <div class="emoji">🔍</div>
+              <h2>沒有符合條件的訂單</h2>
+              <p>試試其他狀態或清除搜尋</p>
+            </div>
+          </div>`;
+
+    return `
+      <div class="container seagm-orders-page">
+        <div class="page-banner seagm-orders-banner">
+          <div class="breadcrumb"><a href="#/">首頁</a> / <a href="#/account">會員中心</a> / <span>我的訂單</span></div>
+          <h1>我的訂單</h1>
+        </div>
+        <div class="member-layout">
+          ${memberNav("orders")}
+          <div class="member-main">
+            <div class="seagm-toolbar">
+              <div class="seagm-tabs" role="tablist" aria-label="訂單狀態">
+                <button type="button" class="seagm-tab active" data-tab="all" role="tab" aria-selected="true">所有${counts.all ? ` ${counts.all}` : ""}</button>
+                <button type="button" class="seagm-tab" data-tab="pending" role="tab" aria-selected="false">待發貨${counts.pending ? ` ${counts.pending}` : ""}</button>
+                <button type="button" class="seagm-tab" data-tab="shipping" role="tab" aria-selected="false">發送中${counts.shipping ? ` ${counts.shipping}` : ""}</button>
+                <button type="button" class="seagm-tab" data-tab="success" role="tab" aria-selected="false">交易成功${counts.success ? ` ${counts.success}` : ""}</button>
+                <button type="button" class="seagm-tab" data-tab="refunded" role="tab" aria-selected="false">已退款${counts.refunded ? ` ${counts.refunded}` : ""}</button>
+              </div>
+              <label class="seagm-search">
+                <input type="search" id="seagm-order-search" placeholder="搜尋訂單編號、商品名稱" autocomplete="off" />
+                <span class="seagm-search-icon" aria-hidden="true">
+                  <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="11" cy="11" r="8"/><path d="m21 21-4.3-4.3"/></svg>
+                </span>
+              </label>
+            </div>
+            ${listHtml}
+          </div>
+        </div>
+      </div>
+      <div class="seagm-modal" id="seagm-card-modal" hidden>
+        <div class="seagm-modal-backdrop" data-close-modal></div>
+        <div class="seagm-modal-panel" role="dialog" aria-modal="true" aria-labelledby="seagm-modal-title">
+          <div class="seagm-modal-head">
+            <h2 id="seagm-modal-title">獲取卡密</h2>
+            <button type="button" class="seagm-modal-close" data-close-modal aria-label="關閉">×</button>
+          </div>
+          <div class="seagm-modal-body" id="seagm-modal-body"></div>
+          <div class="seagm-modal-foot">
+            <button type="button" class="btn btn-outline" data-close-modal>關閉</button>
+            <button type="button" class="btn btn-accent" id="seagm-copy-all">複製全部</button>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function bindOrdersPage(ordersCache) {
+    const root = $(".seagm-orders-page");
+    if (!root) return;
+
+    const list = $("#seagm-order-list");
+    const emptyFilter = $("#seagm-empty-filter");
+    const search = $("#seagm-order-search");
+    let activeTab = "all";
+
+    function applyFilter() {
+      if (!list) return;
+      const q = (search?.value || "").trim().toLowerCase();
+      let shown = 0;
+      $$(".seagm-order-card", list).forEach((card) => {
+        const tab = card.dataset.statusTab || "other";
+        const hay = card.dataset.search || "";
+        const tabOk = activeTab === "all" || tab === activeTab;
+        const qOk = !q || hay.includes(q) || (card.dataset.orderId || "").toLowerCase().includes(q);
+        const ok = tabOk && qOk;
+        card.hidden = !ok;
+        if (ok) shown += 1;
+      });
+      if (emptyFilter) emptyFilter.hidden = shown > 0 || !$$(".seagm-order-card", list).length;
+      if (list) list.hidden = shown === 0 && !!$$(".seagm-order-card", list).length;
+    }
+
+    $$(".seagm-tab", root).forEach((btn) => {
+      btn.addEventListener("click", () => {
+        activeTab = btn.dataset.tab || "all";
+        $$(".seagm-tab", root).forEach((b) => {
+          const on = b === btn;
+          b.classList.toggle("active", on);
+          b.setAttribute("aria-selected", on ? "true" : "false");
+        });
+        applyFilter();
+      });
+    });
+
+    search?.addEventListener("input", applyFilter);
+
+    root.addEventListener("click", (e) => {
+      const hideBtn = e.target.closest("[data-hide-order]");
+      if (hideBtn) {
+        e.preventDefault();
+        const id = hideBtn.getAttribute("data-hide-order");
+        if (!id) return;
+        if (!confirm("確定刪除此訂單記錄？（僅從本機列表隱藏）")) return;
+        hideOrderLocally(id);
+        const card = root.querySelector(`.seagm-order-card[data-order-id="${CSS.escape(id)}"]`);
+        card?.remove();
+        toast("已刪除訂單記錄");
+        // refresh counts lightly
+        applyFilter();
+        return;
+      }
+
+      const getBtn = e.target.closest("[data-get-card]");
+      if (getBtn) {
+        e.preventDefault();
+        const id = getBtn.getAttribute("data-get-card");
+        const order = (ordersCache || []).find((o) => String(o.id) === String(id));
+        openCardModal(order || { id, items: [] });
+        return;
+      }
+
+      const rebuy = e.target.closest("[data-rebuy-product]");
+      if (rebuy) {
+        e.preventDefault();
+        const productId = rebuy.getAttribute("data-rebuy-product") || "";
+        const denom = rebuy.getAttribute("data-rebuy-denom") || "";
+        const qty = Math.max(1, parseInt(rebuy.getAttribute("data-rebuy-qty") || "1", 10) || 1);
+        const product = getProduct(productId);
+        if (!product) {
+          toast("找不到對應商品，請從目錄選購");
+          navigate("/catalog");
+          return;
+        }
+        let option = product.options.find((o) => o.label === denom);
+        if (!option && product.options.length) option = product.options[0];
+        if (!option) {
+          navigate("/product/" + encodeURIComponent(productId));
+          return;
+        }
+        addToCart(productId, option.id, qty);
+        navigate("/cart");
+      }
+    });
+
+    function openCardModal(order) {
+      const modal = $("#seagm-card-modal");
+      const body = $("#seagm-modal-body");
+      if (!modal || !body) return;
+      const codes = demoCardCodes(order);
+      body.innerHTML = `
+        <p class="seagm-modal-note">訂單 <strong>${escapeHtml(order.id || "")}</strong> · 演示卡密（正式環境將顯示真實卡密）</p>
+        <ul class="seagm-code-list">
+          ${codes
+            .map(
+              (c) => `
+            <li>
+              <div class="seagm-code-meta">${escapeHtml(c.title)}${c.denom ? " · " + escapeHtml(c.denom) : ""}</div>
+              <code class="seagm-code">${escapeHtml(c.code)}</code>
+              <button type="button" class="seagm-copy-one" data-copy="${escapeHtml(c.code)}">複製</button>
+            </li>`
+            )
+            .join("")}
+        </ul>`;
+      modal.hidden = false;
+      document.body.style.overflow = "hidden";
+
+      body.querySelectorAll("[data-copy]").forEach((btn) => {
+        btn.addEventListener("click", async () => {
+          const t = btn.getAttribute("data-copy") || "";
+          try {
+            await navigator.clipboard.writeText(t);
+            toast("已複製卡密");
+          } catch {
+            toast(t);
+          }
+        });
+      });
+
+      const copyAll = $("#seagm-copy-all");
+      if (copyAll) {
+        copyAll.onclick = async () => {
+          const text = codes.map((c) => `${c.title}${c.denom ? " " + c.denom : ""}: ${c.code}`).join("\n");
+          try {
+            await navigator.clipboard.writeText(text);
+            toast("已複製全部卡密");
+          } catch {
+            toast("複製失敗，請手動選擇");
+          }
+        };
+      }
+    }
+
+    function closeModal() {
+      const modal = $("#seagm-card-modal");
+      if (!modal) return;
+      modal.hidden = true;
+      document.body.style.overflow = "";
+    }
+
+    $$("[data-close-modal]").forEach((el) => el.addEventListener("click", closeModal));
+  }
+
+  async function renderOrderDetail(id) {
+    if (!currentUser) return requireAuthPage("訂單詳情");
+
+    let order = null;
+    let loadErr = "";
+    try {
+      const { ok, body, status } = await api("/orders/" + encodeURIComponent(id));
+      if (!ok) loadErr = status === 404 ? "找不到此訂單" : ((body && body.error) || "無法載入");
+      else order = body;
+    } catch {
+      loadErr = "無法連線伺服器";
+    }
+
+    if (loadErr || !order) {
+      return `
+        <div class="container">
+          <div class="empty-state">
+            <div class="emoji">😕</div>
+            <h2>${escapeHtml(loadErr || "找不到訂單")}</h2>
+            <a class="btn btn-accent" href="#/orders">返回訂單列表</a>
+          </div>
+        </div>`;
+    }
+
+    const items = order.items || [];
+    return `
+      <div class="container">
+        <div class="page-banner">
+          <div class="breadcrumb">
+            <a href="#/">首頁</a> /
+            <a href="#/account">會員中心</a> /
+            <a href="#/orders">訂單記錄</a> /
+            <span>${escapeHtml(order.id)}</span>
+          </div>
+          <h1>訂單詳情</h1>
+          <p>${statusBadge(order.status, order.status_label)} · ${formatWhen(order.created_at)}（香港）</p>
+        </div>
+        <div class="member-layout">
+          ${memberNav("orders")}
+          <div class="member-main">
+            <div class="form-card">
+              <div class="order-id-box" style="margin:0 0 1.25rem">
+                <div class="label">訂單編號</div>
+                <div class="id">${escapeHtml(order.id)}</div>
+              </div>
+              <div class="confirm-details">
+                <div class="row"><span>狀態</span><span>${statusBadge(order.status, order.status_label)}</span></div>
+                <div class="row"><span>付款方式</span><span>${escapeHtml(order.payment_label || order.payment_method)}</span></div>
+                ${order.email ? `<div class="row"><span>電郵</span><span>${escapeHtml(order.email)}</span></div>` : ""}
+                ${order.game_uid ? `<div class="row"><span>遊戲 UID</span><span>${escapeHtml(order.game_uid)}</span></div>` : ""}
+                ${order.note ? `<div class="row"><span>備註</span><span>${escapeHtml(order.note)}</span></div>` : ""}
+                ${Number(order.admin_fee) > 0 ? `
+                <div class="row"><span>商品小計</span><span>${money(order.subtotal != null ? order.subtotal : (order.total - order.admin_fee))}</span></div>
+                <div class="row"><span>${escapeHtml(orderFeeLabel(order))}</span><span>${money(order.admin_fee)}</span></div>` : ""}
+                <div class="row"><span>合計</span><span><strong>${money(order.total)}</strong></span></div>
+              </div>
+            </div>
+            <div class="form-card" style="margin-top:1rem">
+              <h2>商品明細</h2>
+              <div class="order-lines-detail">
+                ${items
+                  .map(
+                    (i) => `
+                  <div class="order-line">
+                    <div>
+                      <div class="name">${escapeHtml(i.title)}</div>
+                      <div class="sub">${escapeHtml(i.denomination)} × ${i.qty} · 單價 ${money(i.unit_price)}</div>
+                    </div>
+                    <div>${money(i.line_total != null ? i.line_total : i.unit_price * i.qty)}</div>
+                  </div>`
+                  )
+                  .join("")}
+              </div>
+            </div>
+            <div style="margin-top:1rem;display:flex;gap:0.75rem;flex-wrap:wrap">
+              <a class="btn btn-outline" href="#/orders">返回列表</a>
+              <a class="btn btn-accent" href="#/catalog">繼續購物</a>
+            </div>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function renderOrder() {
+    let order = null;
+    try {
+      order = JSON.parse(localStorage.getItem(ORDER_KEY));
+    } catch {
+      order = null;
+    }
+    if (!order) {
+      return `
+        <div class="container">
+          <div class="empty-state" style="margin-top:2rem">
+            <div class="emoji">📦</div>
+            <h2>尚無訂單</h2>
+            <a class="btn btn-accent" href="#/catalog">去逛逛</a>
+          </div>
+        </div>`;
+    }
+
+    const when = formatWhen(order.created_at || order.createdAt);
+    const items = order.items || [];
+    const payLabel = order.payment_label || order.payment || order.payment_method || "";
+    const statusHtml = order.status
+      ? statusBadge(order.status, order.status_label)
+      : statusBadge("paid", "已付款");
+
+    return `
+      <div class="container">
+        <div class="confirm-card">
+          <div class="confirm-icon">✓</div>
+          <h1>訂單已建立</h1>
+          <p>感謝你的購買。可在會員中心查看訂單狀態。</p>
+          <div class="order-id-box">
+            <div class="label">訂單編號</div>
+            <div class="id">${escapeHtml(order.id)}</div>
+          </div>
+          <div class="confirm-details">
+            <div class="row"><span>狀態</span><span>${statusHtml}</span></div>
+            ${order.email ? `<div class="row"><span>電郵</span><span>${escapeHtml(order.email)}</span></div>` : ""}
+            ${(order.game_uid || order.uid) ? `<div class="row"><span>遊戲 UID</span><span>${escapeHtml(order.game_uid || order.uid)}</span></div>` : ""}
+            <div class="row"><span>付款方式</span><span>${escapeHtml(payLabel)}</span></div>
+            <div class="row"><span>下單時間</span><span>${when}（香港）</span></div>
+            <div class="row"><span>商品數</span><span>${items.reduce((s, i) => s + (i.qty || 0), 0)} 件</span></div>
+            ${Number(order.admin_fee) > 0 ? `
+            <div class="row"><span>商品小計</span><span>${money(order.subtotal != null ? order.subtotal : (order.total - order.admin_fee))}</span></div>
+            <div class="row"><span>${escapeHtml(orderFeeLabel(order))}</span><span>${money(order.admin_fee)}</span></div>` : ""}
+            <div class="row"><span>合計</span><span>${money(order.total)}</span></div>
+          </div>
+          <div style="display:flex;gap:0.75rem;justify-content:center;flex-wrap:wrap">
+            <a class="btn btn-accent" href="#/orders/${encodeURIComponent(order.id)}">查看訂單</a>
+            <a class="btn btn-outline" href="#/orders">訂單記錄</a>
+            <a class="btn btn-outline" href="#/catalog">繼續購物</a>
+          </div>
+        </div>
+      </div>`;
+  }
+
+  function escapeHtml(s) {
+    return String(s)
+      .replace(/&/g, "&amp;")
+      .replace(/</g, "&lt;")
+      .replace(/>/g, "&gt;")
+      .replace(/"/g, "&quot;");
+  }
+
+  async function render() {
+    const route = parseHash();
+    setActiveNav(route.page, route.category);
+    const app = $("#app");
+    if (!app) return;
+
+    let html = "";
+    switch (route.page) {
+      case "catalog":
+        html = renderCatalog(route.category);
+        break;
+      case "product":
+        html = renderProduct(route.id);
+        break;
+      case "cart":
+        html = renderCart();
+        break;
+      case "checkout":
+        html = renderCheckout();
+        break;
+      case "order":
+        html = renderOrder();
+        break;
+      case "login":
+        html = renderLogin();
+        break;
+      case "register":
+        html = renderRegister();
+        break;
+      case "account":
+        html = await renderAccount(route.section);
+        break;
+      case "orders":
+        html = await renderOrders();
+        break;
+      case "order-detail":
+        html = await renderOrderDetail(route.id);
+        break;
+      case "pay-result":
+        html = await renderPayResult(route.id);
+        break;
+      default:
+        html = renderHome();
+    }
+    app.innerHTML = html;
+    updateCartBadge();
+    updateAuthUI();
+    window.scrollTo({ top: 0, behavior: "instant" in window ? "instant" : "auto" });
+
+    if (route.page === "product") bindProductPage();
+    if (route.page === "cart") bindCartPage();
+    if (route.page === "checkout") bindCheckoutPage();
+    if (route.page === "login" || route.page === "register") bindAuthForm();
+    if (route.page === "account" && route.section === "password") bindPasswordForm();
+    if (route.page === "orders") bindOrdersPage(lastOrdersCache);
+    if (route.page === "pay-result") bindPayResultPage(route.id);
+
+    $(".mobile-nav")?.classList.remove("open");
+  }
+
+  function init() {
+    updateCartBadge();
+    $("#menu-toggle")?.addEventListener("click", () => {
+      $(".mobile-nav")?.classList.toggle("open");
+    });
+    window.addEventListener("hashchange", render);
+    refreshAuth().finally(() => render());
+  }
+
+  if (document.readyState === "loading") {
+    document.addEventListener("DOMContentLoaded", init);
+  } else {
+    init();
+  }
+})();

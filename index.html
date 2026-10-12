@@ -1,80 +1,109 @@
 <!DOCTYPE html>
-<html lang="zh-Hant">
+<html lang="zh-HK">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="XueAiOK — 乾淨好買的遊戲充值與點卡。香港點卡禮品、手遊直充演示商城。" />
-  <title>XueAiOK — 遊戲充值與點卡</title>
+  <meta name="format-detection" content="telephone=no, date=no, address=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no, viewport-fit=cover" />
+  <meta name="description" content="3388.HK — 香港遊戲充值及點卡平台：MyCard、PSN 禮物卡、手遊儲值，港幣結算，支援 FPS、PayMe、AlipayHK、WeChat Pay。" />
+  <link rel="canonical" href="https://3388.hk/" />
+  <meta property="og:type" content="website" />
+  <meta property="og:site_name" content="3388.HK" />
+  <meta property="og:locale" content="zh_HK" />
+  <meta property="og:title" content="3388.HK — 香港遊戲充值與點卡" />
+  <meta property="og:description" content="香港遊戲點卡、禮品卡及手遊儲值，港幣結算，即買即發。" />
+  <meta property="og:url" content="https://3388.hk/" />
+  <meta property="og:image" content="https://3388.hk/images/logo-header.png" />
+  <script type="application/ld+json">{"@context":"https://schema.org","@type":"WebSite","name":"3388.HK","url":"https://3388.hk/","publisher":{"@type":"Organization","name":"HOGAME ONLINE ENTERTAINMENT LIMITED"}}</script>
+  <meta name="theme-color" content="#f5f5f7" />
+  <title>3388.HK — 香港遊戲充值與點卡 | 遊戲點卡・手遊儲值・CD-KEY</title>
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="css/styles.css" />
-  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect width='32' height='32' rx='8' fill='%230d9488'/%3E%3Ctext x='16' y='22' text-anchor='middle' fill='white' font-size='14' font-family='system-ui' font-weight='700'%3EX%3C/text%3E%3C/svg%3E" />
+  <link rel="stylesheet" href="css/styles.css?v=cookie1" />
+  <link rel="stylesheet" href="css/site-bg.css?v=cookie1" />
+  <link rel="icon" type="image/png" sizes="32x32" href="images/favicon-32.png?v=cookie1" />
+  <link rel="icon" type="image/png" sizes="64x64" href="images/favicon.png?v=cookie1" />
+  <link rel="apple-touch-icon" href="images/favicon.png?v=cookie1" />
 </head>
 <body>
   <header class="site-header">
-    <div class="container header-inner">
-      <a class="logo" href="#/" aria-label="XueAiOK 首頁">
-        <span class="logo-mark">X</span>
-        <span class="logo-text">XueAi<span>OK</span></span>
+    <div class="header-inner">
+      <a class="logo" href="#/" aria-label="3388 首頁">
+        <img class="logo-img" src="images/logo-header.png?v=cookie1" width="137" height="48" alt="3388.HK — 100%官方正品，即買即發" />
       </a>
       <nav class="nav-links" aria-label="主選單">
         <a href="#/">首頁</a>
-        <a href="#/catalog">全部商品</a>
-        <a href="#/catalog/giftcard">點卡禮品</a>
-        <a href="#/catalog/mobile">手遊直充</a>
+        <a href="#/catalog">全部</a>
+        <a href="#/catalog/giftcard">點卡</a>
+        <a href="#/catalog/mobile">手遊</a>
+        <a href="#/catalog/gold">金幣</a>
+        <a href="#/catalog/membership">會員</a>
+        <a href="#/catalog/cdkey">KEY</a>
       </nav>
+      <form class="hdr-search" onsubmit="event.preventDefault();location.hash='#/catalog?q='+encodeURIComponent(this.q.value.trim());">
+        <span class="search-ico-wrap" aria-hidden="true"><svg class="search-ico" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true"><circle cx="11" cy="11" r="7"/><path d="M20 20l-3.5-3.5"/></svg></span><input name="q" type="search" placeholder="搜尋遊戲或點卡" />
+      </form>
+      <span class="hdr-locale" title="地區／語言／貨幣">🇭🇰 繁中 · HKD</span>
       <div class="header-actions">
+        <div class="auth-slot" id="auth-slot">
+          <a class="auth-link" href="#/login">登入</a>
+          <a class="btn btn-accent btn-sm auth-register" href="#/register">註冊</a>
+        </div>
         <a class="cart-btn" href="#/cart" aria-label="購物車">
           <span aria-hidden="true">🛒</span>
           <span class="cart-label">購物車</span>
           <span class="cart-count" data-count="0"></span>
         </a>
-        <button type="button" class="menu-toggle" id="menu-toggle" aria-label="開啟選單">☰</button>
+        <button type="button" class="menu-toggle" id="menu-toggle" aria-label="開啟選單" hidden>☰</button>
       </div>
     </div>
   </header>
 
-  <nav class="mobile-nav" aria-label="手機選單">
+  <nav class="mobile-nav" aria-label="手機選單" hidden>
     <a href="#/">首頁</a>
-    <a href="#/catalog">全部商品</a>
-    <a href="#/catalog/giftcard">點卡禮品</a>
-    <a href="#/catalog/mobile">手遊直充</a>
+    <a href="#/catalog">全部</a>
+    <a href="#/catalog/giftcard">點卡</a>
+    <a href="#/catalog/mobile">手遊</a>
+    <a href="#/catalog/gold">金幣</a>
+    <a href="#/catalog/membership">會員</a>
+    <a href="#/catalog/cdkey">KEY</a>
     <a href="#/cart">購物車</a>
+    <a href="#/login" data-auth="guest">登入</a>
+    <a href="#/register" data-auth="guest">註冊</a>
+    <a href="#/account" data-auth="user" id="mobile-user" hidden>會員中心</a>
+    <a href="#/orders" data-auth="user" hidden>訂單記錄</a>
   </nav>
 
   <main id="app"></main>
 
-  <footer class="site-footer">
+  <nav class="bottom-nav" aria-label="底部導覽">
+    <a href="#/" data-nav="home"><span class="bn-icon" aria-hidden="true">🏠</span>首頁</a>
+    <a href="#/catalog" data-nav="catalog"><span class="bn-icon" aria-hidden="true">🎮</span>商店</a>
+    <a href="#/catalog/giftcard" data-nav="giftcard"><span class="bn-icon" aria-hidden="true">🎁</span>點卡</a>
+    <a class="bn-cart" href="#/cart" data-nav="cart">
+      <span class="bn-icon" aria-hidden="true">🛒</span>購物車
+      <span class="cart-count" data-count="0"></span>
+    </a>
+    <a href="#/account" data-nav="account"><span class="bn-icon" aria-hidden="true">👤</span>會員</a>
+  </nav>
+
+  <footer class="site-footer ft">
     <div class="container">
-      <div class="footer-grid">
-        <div class="footer-brand">
-          <a class="logo" href="#/">
-            <span class="logo-mark">X</span>
-            <span class="logo-text">XueAi<span>OK</span></span>
-          </a>
-          <p>乾淨好買的遊戲充值與點卡。本站為功能演示，品牌名 XueAiOK，無真實交易。</p>
-        </div>
-        <div class="footer-col">
-          <h4>商品</h4>
-          <a href="#/catalog/giftcard">點卡禮品</a>
-          <a href="#/catalog/mobile">手遊直充</a>
-          <a href="#/catalog">全部商品</a>
-        </div>
-        <div class="footer-col">
-          <h4>說明</h4>
-          <a href="#/cart">購物車</a>
-          <a href="#/checkout">結帳（演示）</a>
-        </div>
+      <div class="ft-pay">
+        <span class="pl pl-fps">FPS</span><span class="pl pl-payme">PayMe</span><span class="pl pl-wechat">WeChat Pay</span>
+        <span class="pl pl-alipay">AlipayHK</span><span class="pl pl-boost">Boost</span><span class="pl pl-tng">Touch'n Go</span>
       </div>
-      <div class="footer-bottom">
-        <span>© 2026 XueAiOK · 演示商城</span>
-        <span>UI 語言：繁體中文 · 價錢：港幣 HKD</span>
+      <div class="ft-social" id="ft-social" hidden></div>
+      <nav class="ft-links ft-info"><a href="/contact.html">聯絡我們</a><a href="/about.html">關於我們</a><a href="/news/">平台新聞</a><a href="/faq.html">常見問題</a></nav>
+      <div class="ft-bar">
+        <div class="ft-left"><span>© 2026 3388.HK · HOGAME ONLINE ENTERTAINMENT LIMITED</span></div>
+        <nav class="ft-links ft-legal"><a href="/terms.html">服務使用條款</a><a href="/privacy.html">私隱政策</a></nav>
       </div>
     </div>
   </footer>
 
-  <script src="js/data.js"></script>
-  <script src="js/app.js"></script>
+  <script src="js/data.js?v=cookie1"></script>
+  <script src="js/app.js?v=cookie1"></script>
+  <script src="js/cookie-consent.js?v=cookie1"></script>
 </body>
 </html>

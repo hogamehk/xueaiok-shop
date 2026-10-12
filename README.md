@@ -1,66 +1,63 @@
-# XueAiOK 演示商城
+# 3388 商城（3388.HK）
 
-乾淨明亮風格的遊戲充值／點卡電商演示站（繁體中文）。功能類似常見國際點卡站，但視覺獨立，**非 SEAGM 複刻**。
+寬屏 App Store 風格靜態前端 + Flask/SQLite 會員與訂單 API。
 
-> 品牌名 **XueAiOK** 為正式暫定名；本專案僅供介面與下單流程演示，**沒有後端、不會真實扣款或發貨**。
+公司：HOGAME ONLINE ENTERTAINMENT LIMITED  
+品牌／域名：3388 · 3388.HK
 
-## 如何預覽
-
-在專案目錄啟動本地靜態伺服器：
-
+## 本機靜態預覽
 ```bash
-cd /workspace/xueaiok-shop
 python3 -m http.server 8765
 ```
+註冊／訂單需連到已部署 API 的 VPS（同源 `/api`）。
 
-瀏覽器開啟：
+## 會員路由
+- `#/account` 會員中心
+- `#/orders` 訂單記錄
+- `#/orders/:id` 訂單詳情
+- `#/account/password` 修改密碼
+- `#/login` `#/register`
 
+演示帳號：`DemoUser` / `demo1234`
+
+
+## 平台新聞 / 靜態資訊頁（SEO）
+
+靜態頁由 `tools/build_pages.py` 生成：`news/*.html`、`news/latest.json`（首頁最新 3 則）、`about.html`、`faq.html`、`terms.html`、`privacy.html`、`sitemap.xml`、`robots.txt`。
+
+新增文章：
+1. 複製 `content/news/mycard-topup-guide.json` 為 `content/news/<slug>.json`。
+2. 修改 `slug`、`title`、`description`、`date`（YYYY-MM-DD）、`product`（商品 id，對應 `/#/product/<id>`）、`productName`、`body`（`["p", 文字]`、`["h2", 標題]`、`["ul"/"ol", [項目...]]`）。
+3. 執行 `python3 tools/build_pages.py`，再把生成檔案部署到 VPS `/var/www/xueaiok/`。
+
+注意：關於我們／使用條款／私隱條款為**草稿**，須經法律審閱；`【待填寫】` 為公司註冊編號、地址、電郵等待補資料。內容在 `tools/build_pages.py` 內修改。
+
+## 商品資料（單一來源）及商品 SEO 頁
+
+- 商品資料唯一來源：`content/products.json`（brand、categories、products[].options[]）。
+- `js/data.js` 由 `tools/products.py` **自動生成**，請勿手改。
+- 後端 `catalog_prices()` 直接讀 `content/products.json`（檔案更新即生效），訂單價格一律以此為準。
+- 每個商品生成可被搜尋引擎抓取的 `/product/<slug>.html`（title、description、canonical、OG、JSON-LD Product/AggregateOffer + BreadcrumbList、伺服器端 H1/面額/價格），載入後由 SPA 接管購買介面。舊 `/#/product/<id>` 會自動轉到新網址。
+
+修改商品後重建：
+```bash
+python3 tools/build_pages.py        # 全部靜態頁 + 商品頁 + sitemap
+python3 tools/products.py           # 只重建 data.js + 商品頁 + sitemap 商品網址
 ```
-http://127.0.0.1:8765/
+日後管理後台：
+```python
+import sys; sys.path.insert(0, "/var/www/xueaiok/tools")
+from products import load_products, save_products
+data = load_products(); ...edit...; save_products(data)
+# 然後在 backend/app.py 內呼叫 regenerate_product_pages()（已提供），會重建 data.js、商品頁及 sitemap，並清除價格快取。
 ```
+注意：後端程序需對 `/var/www/xueaiok/{js,product,content,sitemap.xml}` 有寫入權限（目前檔案屬 www-data）。
 
-也可直接用瀏覽器打開 `index.html`（建議仍用 `http.server`，以確保路由與字型載入正常）。
 
-## 已實作頁面／流程
+## 網站背景（節日圖）
 
-| 路由 | 說明 |
-|------|------|
-| `#/` | 首頁：Hero、分類、精選商品、信任條（秒充／安全／客服） |
-| `#/catalog` | 全部商品 |
-| `#/catalog/giftcard` | 點卡禮品分類 |
-| `#/catalog/mobile` | 手遊直充分類 |
-| `#/product/:id` | 商品詳情：面額、數量、加入購物車 |
-| `#/cart` | 購物車：改數量、移除、小計 |
-| `#/checkout` | 結帳：電郵、UID／備註、FPS／PayMe／信用卡（演示） |
-| `#/order` | 訂單確認：本機產生假訂單編號 |
-
-購物車與最近一筆訂單存在瀏覽器 `localStorage`。
-
-## 品牌色（暫定）
-
-- 主色 Teal：`#0d9488` / hover `#0f766e`
-- 輔助 Coral：`#f97316`（徽章、購物車數字）
-- 背景：白／淺灰 `#f7f8fb`
-- 字色：`#0f172a`
-
-## 目錄結構
-
-```
-xueaiok-shop/
-├── index.html
-├── css/styles.css
-├── js/data.js      # 商品目錄
-├── js/app.js       # 路由、購物車、結帳
-└── README.md
-```
-
-## 限制
-
-- 純靜態前端，無庫存、無真實支付閘道
-- 商品圖為色塊縮寫示意，非官方素材
-- 結帳僅寫入本機訂單物件並清空購物車
-- 未接客服／登入／訂單查詢後端
-
-## 技術
-
-HTML + 自訂 CSS + Vanilla JS（Hash SPA），Google Fonts：Noto Sans TC、Outfit。
+- 預設：溫暖淺灰漸層（無自訂圖時）。
+- **臨時管理頁**（日後會移入正式後台）：登入管理員後開啟 `/admin/background.html` 上傳 JPG／PNG／WebP（≤5MB），或移除恢復預設。一般會員中心不顯示此功能。
+- 設定存於 `content/site.json`，圖片在 `images/bg/custom.*`，並生成 `css/site-bg.css`。
+- 管理員：環境變數 `ADMIN_USERNAMES`（逗號分隔，不區分大小寫），預設另含 `DemoUser`／`hogame`，以及電郵 `hogamehk@gmail.com` 的帳戶。
+  例：在 systemd 加 `Environment=ADMIN_USERNAMES=hogame,alice`
