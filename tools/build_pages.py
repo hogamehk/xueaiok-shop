@@ -8,7 +8,7 @@ from datetime import date
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 SITE = "https://3388.hk"
-V = "cookie1"
+V = "news1"
 BRAND = "3388.HK"
 CO = "HOGAME ONLINE ENTERTAINMENT LIMITED"
 E = html.escape
@@ -33,8 +33,8 @@ def social_links(cls="ft-social"):
 def header():
     return f'''<header class="site-header">
     <div class="header-inner">
-      <a class="logo" href="/#/" aria-label="3388 首頁"><img class="logo-img" src="/images/logo-header.png?v=cookie1" width="137" height="48" alt="3388.HK — 100%官方正品，即買即發" /></a>
-      <nav class="nav-links" aria-label="主選單"><a href="/#/">首頁</a><a href="/#/catalog">全部</a><a href="/news/">平台新聞</a><a href="/faq.html">常見問題</a></nav>
+      <a class="logo" href="/#/" aria-label="3388 首頁"><img class="logo-img" src="/images/logo-header.png?v={V}" width="137" height="48" alt="3388.HK — 100%官方正品，即買即發" /></a>
+      <nav class="nav-links" aria-label="主選單"><a href="/#/">首頁</a><a href="/#/catalog">全部</a><a href="/news/">最新消息</a><a href="/faq.html">常見問題</a></nav>
       <div class="header-actions"><a class="auth-link" href="/#/account">會員中心</a><a class="cart-btn" href="/#/cart" aria-label="購物車"><span aria-hidden="true">🛒</span><span class="cart-count" data-count="0"></span></a></div>
     </div>
   </header>'''
@@ -44,7 +44,7 @@ def footer():
     <div class="container">
       <div class="ft-pay"><span class="pl pl-fps">FPS</span><span class="pl pl-payme">PayMe</span><span class="pl pl-wechat">WeChat Pay</span><span class="pl pl-alipay">AlipayHK</span><span class="pl pl-boost">Boost</span><span class="pl pl-tng">Touch'n Go</span></div>
       {social_links()}
-      <nav class="ft-links ft-info"><a href="/contact.html">聯絡我們</a><a href="/about.html">關於我們</a><a href="/news/">平台新聞</a><a href="/faq.html">常見問題</a></nav>
+      <nav class="ft-links ft-info"><a href="/contact.html">聯絡我們</a><a href="/about.html">關於我們</a><a href="/news/">最新消息</a><a href="/faq.html">常見問題</a></nav>
       <div class="ft-bar">
         <div class="ft-left"><span>© 2026 {BRAND} · {CO}</span></div>
         <nav class="ft-links ft-legal"><a href="/terms.html">服務使用條款</a><a href="/privacy.html">私隱政策</a></nav>
@@ -87,10 +87,10 @@ def page(path, title, desc, body, crumbs, jsonld=None, og_type="website", draft=
   <meta property="og:url" content="{url}" />
   <meta property="og:image" content="{SITE}/images/logo-header.png" />
   <meta name="twitter:card" content="summary" />
-  <link rel="icon" type="image/png" href="/images/favicon.png?v=cookie1" />
+  <link rel="icon" type="image/png" href="/images/favicon.png?v={V}" />
   <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+TC:wght@400;500;600;700;800&family=Outfit:wght@600;700;800&display=swap" rel="stylesheet" />
-  <link rel="stylesheet" href="/css/styles.css?v=cookie1" />
-  <link rel="stylesheet" href="/css/site-bg.css?v=cookie1" />
+  <link rel="stylesheet" href="/css/styles.css?v={V}" />
+  <link rel="stylesheet" href="/css/site-bg.css?v={V}" />
   <script type="application/ld+json">{json.dumps(ld if len(ld) > 1 else ld[0], ensure_ascii=False)}</script>
 </head>
 <body class="info-page">
@@ -102,7 +102,7 @@ def page(path, title, desc, body, crumbs, jsonld=None, og_type="website", draft=
   {footer()}
   {bottom_nav()}
   <script>fetch("/api/site-settings").then(function(r){{return r.ok?r.json():null}}).then(function(s){{if(s&&s.background_url){{document.body.classList.add("has-custom-bg");document.body.style.setProperty("--site-bg-image","url("+s.background_url+")")}} }}).catch(function(){{}});</script>
-  <script src="/js/cookie-consent.js?v=cookie1"></script>
+  <script src="/js/cookie-consent.js?v={V}"></script>
 </body>
 </html>
 '''
@@ -292,15 +292,15 @@ for a in arts:
           "datePublished": a["date"], "dateModified": a.get("updated", a["date"]), "inLanguage": "zh-HK",
           "mainEntityOfPage": SITE + path, "image": SITE + "/images/logo-header.png",
           "author": {"@type": "Organization", "name": BRAND}, "publisher": {"@type": "Organization", "name": CO, "logo": {"@type": "ImageObject", "url": SITE + "/images/logo-header.png"}}}
-    body = f'''<article class="info-card news-article"><h1>{E(a["title"])}</h1><p class="info-meta"><time datetime="{a["date"]}">{a["date"]}</time> · 平台新聞</p>
+    body = f'''<article class="info-card news-article"><h1>{E(a["title"])}</h1><p class="info-meta"><time datetime="{a["date"]}">{a["date"]}</time> · 最新消息</p>
 {render_blocks(a["body"])}
 <div class="news-cta"><a class="btn btn-accent" href="{E(PRODUCT_URL.get(a["product"], "/#/product/" + a["product"]))}">前往購買 {E(a["productName"])}</a><a class="btn btn-outline" href="/news/">返回新聞列表</a></div></article>'''
-    write(path.lstrip("/"), page(path, a["title"], a["description"], body, [("首頁", "/"), ("平台新聞", "/news/"), (a["title"], path)], ld, "article"))
+    write(path.lstrip("/"), page(path, a["title"], a["description"], body, [("首頁", "/"), ("最新消息", "/news/"), (a["title"], path)], ld, "article"))
 
-idx = '<div class="info-card"><h1>平台新聞</h1><p>購買教學、商品資訊及平台公告。</p></div><div class="news-list">' + "".join(
+idx = '<div class="info-card"><h1>最新消息</h1><p>購買教學、商品資訊及平台公告。</p></div><div class="news-list">' + "".join(
   f'<a class="news-card" href="/news/{a["slug"]}.html"><time datetime="{a["date"]}">{a["date"]}</time><h2>{E(a["title"])}</h2><p>{E(a["description"])}</p><span class="news-more">閱讀全文 →</span></a>' for a in arts) + "</div>"
-write("news/index.html", page("/news/", "平台新聞", "3388.HK 平台新聞：遊戲點卡、禮品卡及手遊儲值購買教學與公告。", idx, [("首頁", "/"), ("平台新聞", "/news/")],
-  {"@context": "https://schema.org", "@type": "CollectionPage", "name": "平台新聞", "url": SITE + "/news/"}))
+write("news/index.html", page("/news/", "最新消息", "3388.HK 最新消息：遊戲點卡、禮品卡及手遊儲值購買教學與公告。", idx, [("首頁", "/"), ("最新消息", "/news/")],
+  {"@context": "https://schema.org", "@type": "CollectionPage", "name": "最新消息", "url": SITE + "/news/"}))
 write("news/latest.json", json.dumps([{k: a[k] for k in ("slug", "title", "description", "date")} for a in arts[:3]], ensure_ascii=False))
 
 urls = ["/", "/news/", "/about.html", "/faq.html", "/terms.html", "/privacy.html", "/contact.html"] + [f"/news/{a['slug']}.html" for a in arts]

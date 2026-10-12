@@ -397,13 +397,13 @@
           <div><span>3</span><p><b>即時到帳</b>卡密發送至會員中心</p></div>
         </section>
         <section class="home-news" id="home-news" hidden>
-          <div class="home-news-head"><h2>平台新聞</h2><a href="/news/">查看全部 →</a></div>
+          <div class="home-news-head"><h2>最新消息</h2><a href="/news/">查看全部 →</a></div>
           <div class="news-list" id="home-news-list"></div>
         </section>
       </div>`;
   }
   function loadHomeNews() {
-    fetch("/news/latest.json?v=info2").then((r) => (r.ok ? r.json() : [])).then((list) => {
+    fetch("/news/latest.json?v=news1").then((r) => (r.ok ? r.json() : [])).then((list) => {
       const box = $("#home-news-list");
       if (!box || !Array.isArray(list) || !list.length) return;
       box.innerHTML = list.slice(0, 3).map((a) => `<a class="news-card" href="/news/${encodeURIComponent(a.slug)}.html"><time>${escapeHtml(a.date)}</time><h3>${escapeHtml(a.title)}</h3><p>${escapeHtml(a.description)}</p></a>`).join("");

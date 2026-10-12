@@ -21,7 +21,7 @@ python3 -m http.server 8765
 演示帳號：`DemoUser` / `demo1234`
 
 
-## 平台新聞 / 靜態資訊頁（SEO）
+## 最新消息 / 靜態資訊頁（SEO）
 
 靜態頁由 `tools/build_pages.py` 生成：`news/*.html`、`news/latest.json`（首頁最新 3 則）、`about.html`、`faq.html`、`terms.html`、`privacy.html`、`sitemap.xml`、`robots.txt`。
 
